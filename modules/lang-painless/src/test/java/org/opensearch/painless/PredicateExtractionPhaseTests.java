@@ -194,6 +194,46 @@ public class PredicateExtractionPhaseTests extends ScriptTestCase {
         assertNull(extract("doc['price'].size() == 1"));
     }
 
+    // --- guarded string equality extracts a Term ---------------------------
+
+    public void testGuardedStringEquality() {
+        ExtractedPredicate.Term t = (ExtractedPredicate.Term) extract("doc['status'].size() == 1 && doc['status'].value == 'active'");
+        assertNotNull(t);
+        assertEquals("status", t.field());
+        assertEquals("active", t.value());
+    }
+
+    public void testGuardedStringEqualityLiteralOnLeft() {
+        ExtractedPredicate.Term t = (ExtractedPredicate.Term) extract("doc['status'].size() == 1 && 'active' == doc['status'].value");
+        assertNotNull(t);
+        assertEquals("active", t.value());
+    }
+
+    public void testDeclineStringInequality() {
+        // `!=` on a Term has no clean single-query Lucene equivalent.
+        assertNull(extract("doc['status'].size() == 1 && doc['status'].value != 'active'"));
+    }
+
+    public void testDeclineStringEqualityWithoutGuard() {
+        assertNull(extract("doc['status'].value == 'active'"));
+    }
+
+    public void testDeclineStringEqualityWithPresenceOnlyGuard() {
+        // size() != 0 doesn't prove single-valuedness; multi-valued docs like ["active","old"]
+        // would false-positive since Painless reads get(0) but a TermQuery matches any-of.
+        assertNull(extract("doc['status'].size() != 0 && doc['status'].value == 'active'"));
+    }
+
+    public void testDeclineStringEqualityWhenGuardIsOnDifferentField() {
+        assertNull(extract("doc['region'].size() == 1 && doc['status'].value == 'active'"));
+    }
+
+    public void testDeclineMixedStringAndNumericConjuncts() {
+        // This PR only handles single-comparison Term extraction. Chains mixing a numeric range
+        // with a string equality would need an `And` carrier — declined for now.
+        assertNull(extract("doc['status'].size() == 1 && doc['status'].value == 'active' && doc['status'].value == 'x'"));
+    }
+
     // --- other negative cases (must decline extraction) ---------------------
 
     public void testDeclineOnLogicalOr() {

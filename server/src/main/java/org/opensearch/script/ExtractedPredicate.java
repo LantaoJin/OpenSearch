@@ -9,6 +9,8 @@
 package org.opensearch.script;
 
 import org.apache.lucene.search.Query;
+import org.opensearch.common.lucene.Lucene;
+import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.query.QueryShardContext;
 
@@ -123,6 +125,80 @@ public abstract class ExtractedPredicate {
                 + ", includeUpper="
                 + includeUpper
                 + '}';
+        }
+    }
+
+    /**
+     * A single-value equality predicate on one field, produced from shapes like
+     * {@code doc['status'].size() == 1 && doc['status'].value == 'active'}. The value is typed as
+     * {@code Object} to pass through whatever the script engine captured (typically {@code String}
+     * for keyword fields); {@link MappedFieldType#termQuery} handles the type coercion.
+     */
+    public static final class Term extends ExtractedPredicate {
+        private final String field;
+        private final Object value;
+
+        public Term(String field, Object value) {
+            this.field = Objects.requireNonNull(field, "field");
+            this.value = Objects.requireNonNull(value, "value");
+        }
+
+        public String field() {
+            return field;
+        }
+
+        public Object value() {
+            return value;
+        }
+
+        @Override
+        public Query toQuery(QueryShardContext context) {
+            MappedFieldType fieldType = context.fieldMapper(field);
+            if (fieldType == null) {
+                return null;
+            }
+            // Painless' `doc['f'].value` reads the raw stored bytes from doc values, so the only
+            // field types where `termQuery(literal)` is script-equivalent are those that look up
+            // the literal without analysis or coercion:
+            //   - text: `termQuery` searches analyzed tokens, which differ from the raw value the
+            //     script reads; fielddata may also be disabled, in which case the script throws
+            //     while the rewrite silently matches/misses.
+            //   - keyword with a normalizer: the literal is lowercased / asciifolded before
+            //     lookup, so `'Active'` matches a stored `active` even though the script reading
+            //     the raw `active` and comparing to `'Active'` returns false.
+            // Restrict to KeywordFieldType whose search analyzer is the keyword analyzer
+            // (i.e. no normalizer). Anything else falls back to the script.
+            if ((fieldType instanceof KeywordFieldMapper.KeywordFieldType) == false) {
+                return null;
+            }
+            if (fieldType.getTextSearchInfo().getSearchAnalyzer() != Lucene.KEYWORD_ANALYZER) {
+                return null;
+            }
+            try {
+                return fieldType.termQuery(value, context);
+            } catch (IllegalArgumentException | UnsupportedOperationException e) {
+                // Field type doesn't support term queries, or the value doesn't parse against
+                // this field type. Fall back to the script in either case.
+                return null;
+            }
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            Term t = (Term) o;
+            return field.equals(t.field) && value.equals(t.value);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(field, value);
+        }
+
+        @Override
+        public String toString() {
+            return "Term{field='" + field + "', value=" + value + '}';
         }
     }
 }

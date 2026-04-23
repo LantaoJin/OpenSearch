@@ -98,6 +98,71 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         assertTrue("presence-only guard must not rewrite (multi-value soundness), got " + query, isScriptQuery(query));
     }
 
+    public void testGuardedStringEqualityRewritesToTerm() throws IOException {
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc['status'].size() == 1 && doc['status'].value == 'active'")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("guarded string equality must rewrite, got " + query, query instanceof ConstantScoreQuery);
+        Query inner = ((ConstantScoreQuery) query).getQuery();
+        assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
+    }
+
+    public void testPresenceOnlyGuardStringEqualityStaysOnScriptQuery() throws IOException {
+        // Same multi-value soundness check as the numeric case: `size() != 0` isn't enough.
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc['status'].size() != 0 && doc['status'].value == 'active'")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue(
+            "presence-only guard on string == must not rewrite (multi-value soundness), got " + query,
+            isScriptQuery(query)
+        );
+    }
+
+    public void testKeywordWithNormalizerStaysOnScriptQuery() throws IOException {
+        // Regression guard for semantic divergence on normalized keyword mappings. A `lowercase`
+        // normalizer lowercases the search literal before lookup, so `termQuery('Active')`
+        // matches docs storing `active` — but Painless' `doc['status'].value == 'Active'` reads
+        // the raw `active` and returns false. The rewrite must decline and let the script run.
+        Settings settings = Settings.builder().putList("index.analysis.normalizer.my_lower.filter", "lowercase").build();
+        IndexService index = createIndexWithSimpleMappings("idx", settings, "status", "type=keyword,normalizer=my_lower");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc['status'].size() == 1 && doc['status'].value == 'Active'")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue(
+            "keyword-with-normalizer must not rewrite (normalizer divergence), got " + query,
+            isScriptQuery(query)
+        );
+    }
+
+    public void testTextFieldStaysOnScriptQuery() throws IOException {
+        // Regression guard for text-field divergence. `termQuery` on a text field searches the
+        // analyzed inverted index; the script reads raw fielddata (or throws if fielddata is
+        // disabled). Different result sets in either direction — the rewrite must decline.
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "title", "type=text");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc['title'].size() == 1 && doc['title'].value == 'hello'")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("text field must not rewrite (analyzer divergence), got " + query, isScriptQuery(query));
+    }
+
     public void testUnmappedFieldFallsBackToScript() throws IOException {
         // Range.toQuery returns null when the field is unmapped; doToQuery must fall back to the
         // script path rather than emitting a broken rewrite.

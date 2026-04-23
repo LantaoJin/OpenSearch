@@ -140,6 +140,15 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
             return null;
         }
 
+        // Single-comparison string-equality: shape is `guard && doc['f'].value == 'literal'`.
+        // Emit a Term carrier. Numeric comparisons fall through to the range-folding loop below.
+        if (guardIndex == 0 && conjuncts.size() == 2 && conjuncts.get(1) instanceof EComp) {
+            ExtractedPredicate.Term term = tryExtractTerm((EComp) conjuncts.get(1), guardedField);
+            if (term != null) {
+                return term;
+            }
+        }
+
         Long lower = null;
         Long upper = null;
         boolean includeLower = true;
@@ -212,6 +221,45 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
             return null;
         }
         return new ExtractedPredicate.Range(comparisonField, lower, upper, includeLower, includeUpper);
+    }
+
+    /**
+     * Match a guarded single string-equality: {@code doc['f'].value == 'literal'} or the literal-
+     * on-left form. Returns a {@link ExtractedPredicate.Term} only if the comparison's field
+     * matches {@code guardedField} — otherwise the guard doesn't cover the read and we decline.
+     * Only {@code ==} is accepted here; {@code !=} would need an OR-of-everything-else that
+     * Lucene doesn't express natively on a term.
+     */
+    private static ExtractedPredicate.Term tryExtractTerm(EComp comp, String guardedField) {
+        if (comp.getOperation() != Operation.EQ) {
+            return null;
+        }
+        String leftField = extractDocField(comp.getLeftNode());
+        String rightLit = extractStringLiteral(comp.getRightNode());
+        String field;
+        String literal;
+        if (leftField != null && rightLit != null) {
+            field = leftField;
+            literal = rightLit;
+        } else {
+            String rightField = extractDocField(comp.getRightNode());
+            String leftLit = extractStringLiteral(comp.getLeftNode());
+            if (rightField == null || leftLit == null) {
+                return null;
+            }
+            field = rightField;
+            literal = leftLit;
+        }
+        if (guardedField.equals(field) == false) {
+            return null;
+        }
+        return new ExtractedPredicate.Term(field, literal);
+    }
+
+    /** Match a bare string literal. Declines everything else, including {@code null}. */
+    private static String extractStringLiteral(AExpression expr) {
+        if ((expr instanceof EString) == false) return null;
+        return ((EString) expr).getString();
     }
 
     /**
