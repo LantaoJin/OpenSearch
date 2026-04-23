@@ -303,6 +303,60 @@ public class PredicateExtractionPhaseTests extends ScriptTestCase {
         assertNull(extract("doc['price'].value > params.threshold"));
     }
 
+    // --- alternate .value spellings under the guard ------------------------
+    //
+    // `doc['f'].value`, `doc['f'].getValue()`, `doc.get('f').value` and
+    // `doc.get('f').getValue()` all compile to the same runtime call chain. Once the guard
+    // holds, they're interchangeable.
+
+    public void testGuardedGetValueMethodSpelling() {
+        ExtractedPredicate.Range r = (ExtractedPredicate.Range) extract(
+            "doc['price'].size() == 1 && doc['price'].getValue() > 10"
+        );
+        assertNotNull(r);
+        assertEquals(Long.valueOf(10L), r.lower());
+    }
+
+    public void testGuardedDocGetSpelling() {
+        ExtractedPredicate.Range r = (ExtractedPredicate.Range) extract(
+            "doc['price'].size() == 1 && doc.get('price').value > 10"
+        );
+        assertNotNull(r);
+        assertEquals(Long.valueOf(10L), r.lower());
+    }
+
+    public void testGuardedDocGetWithGetValue() {
+        ExtractedPredicate.Range r = (ExtractedPredicate.Range) extract(
+            "doc['price'].size() == 1 && doc.get('price').getValue() > 10"
+        );
+        assertNotNull(r);
+        assertEquals(Long.valueOf(10L), r.lower());
+    }
+
+    public void testGuardedDocGetInGuard() {
+        // Guard itself uses doc.get('f').size(); the read uses doc['f'].value.
+        ExtractedPredicate.Range r = (ExtractedPredicate.Range) extract(
+            "doc.get('price').size() == 1 && doc['price'].value > 10"
+        );
+        assertNotNull(r);
+        assertEquals(Long.valueOf(10L), r.lower());
+    }
+
+    public void testGuardedMixedSpellings() {
+        // Guard uses doc.get('f').size(); read uses doc.get('f').getValue(). Different spellings
+        // of the same field resolve to the same key "price" and the same-field check holds.
+        ExtractedPredicate.Range r = (ExtractedPredicate.Range) extract(
+            "doc.get('price').size() == 1 && doc.get('price').getValue() > 10"
+        );
+        assertNotNull(r);
+        assertEquals(Long.valueOf(10L), r.lower());
+    }
+
+    public void testDeclineDocGetWithDynamicKey() {
+        // `doc.get(var)` still declines because the argument isn't a compile-time string literal.
+        assertNull(extract("String f = 'price'; return doc.get(f).size() == 1 && doc.get(f).value > 10;"));
+    }
+
     public void testDeclineParamNestedAccess() {
         // `params.thresholds[0]` isn't an EDot(ESymbol("params"), name); the matcher only accepts
         // the flat shape.
@@ -326,11 +380,6 @@ public class PredicateExtractionPhaseTests extends ScriptTestCase {
 
     public void testDeclineOnDynamicFieldKey() {
         assertNull(extract("String f = 'price'; return doc[f].value > 10;"));
-    }
-
-    public void testDeclineOnDocGetCall() {
-        // doc.get('f') is convertible in principle but out of scope for the MVP.
-        assertNull(extract("doc.get('price').value > 10"));
     }
 
     public void testDeclineOnNotEqual() {

@@ -131,6 +131,23 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         );
     }
 
+    public void testAltSpellingsRewriteToNativeRange() throws IOException {
+        // `doc.get('f')` / `.getValue()` accept the same rewrite as `doc['f']` / `.value`. End-to-
+        // end check that the phase + carrier still produce a ConstantScoreQuery for a mix of alt
+        // spellings in the guard and the read.
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc.get('price').size() == 1 && doc.get('price').getValue() > 10")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("alt-spelling script must rewrite, got " + query, query instanceof ConstantScoreQuery);
+        Query inner = ((ConstantScoreQuery) query).getQuery();
+        assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
+    }
+
     public void testKeywordWithNormalizerStaysOnScriptQuery() throws IOException {
         // Regression guard for semantic divergence on normalized keyword mappings. A `lowercase`
         // normalizer lowercases the search literal before lookup, so `termQuery('Active')`

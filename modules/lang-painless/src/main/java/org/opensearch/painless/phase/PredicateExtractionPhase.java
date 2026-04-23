@@ -329,21 +329,45 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
         return literal == 1L ? field : null;
     }
 
-    /** Match {@code doc['name'].size()} and return {@code name}, else null. */
+    /**
+     * Match {@code doc['name'].size()} or {@code doc.get('name').size()} and return {@code name},
+     * else null. Both spellings resolve to the same runtime lookup.
+     */
     private static String extractDocSizeField(AExpression expr) {
         if ((expr instanceof ECall) == false) return null;
         ECall call = (ECall) expr;
         if ("size".equals(call.getMethodName()) == false) return null;
         if (call.getArgumentNodes().isEmpty() == false) return null;
-        AExpression prefix = call.getPrefixNode();
-        if ((prefix instanceof EBrace) == false) return null;
-        EBrace brace = (EBrace) prefix;
-        AExpression bracePrefix = brace.getPrefixNode();
-        AExpression braceIndex = brace.getIndexNode();
-        if ((bracePrefix instanceof ESymbol) == false) return null;
-        if ("doc".equals(((ESymbol) bracePrefix).getSymbol()) == false) return null;
-        if ((braceIndex instanceof EString) == false) return null;
-        return ((EString) braceIndex).getString();
+        return extractFieldKey(call.getPrefixNode());
+    }
+
+    /**
+     * Canonicalize either spelling of a field lookup prefix — {@code doc['name']} or
+     * {@code doc.get('name')} — and return the field name. Returns null if the expression is
+     * neither shape or uses a non-constant key (dynamic field name).
+     */
+    private static String extractFieldKey(AExpression expr) {
+        if (expr instanceof EBrace) {
+            EBrace brace = (EBrace) expr;
+            AExpression bracePrefix = brace.getPrefixNode();
+            AExpression braceIndex = brace.getIndexNode();
+            if ((bracePrefix instanceof ESymbol) == false) return null;
+            if ("doc".equals(((ESymbol) bracePrefix).getSymbol()) == false) return null;
+            if ((braceIndex instanceof EString) == false) return null;
+            return ((EString) braceIndex).getString();
+        }
+        if (expr instanceof ECall) {
+            ECall call = (ECall) expr;
+            if ("get".equals(call.getMethodName()) == false) return null;
+            if (call.getArgumentNodes().size() != 1) return null;
+            AExpression callPrefix = call.getPrefixNode();
+            if ((callPrefix instanceof ESymbol) == false) return null;
+            if ("doc".equals(((ESymbol) callPrefix).getSymbol()) == false) return null;
+            AExpression arg = call.getArgumentNodes().get(0);
+            if ((arg instanceof EString) == false) return null;
+            return ((EString) arg).getString();
+        }
+        return null;
     }
 
     /**
@@ -451,20 +475,33 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
         return b;
     }
 
-    /** Match {@code doc['name'].value} and return {@code name}, else null. */
+    /**
+     * Match any equivalent spelling of a single-value field read and return the field name, else
+     * null. Painless accepts both bean-access and getter forms on each of the two
+     * {@link org.opensearch.search.lookup.LeafDocLookup} lookups:
+     * <ul>
+     *   <li>{@code doc['f'].value}</li>
+     *   <li>{@code doc['f'].getValue()}</li>
+     *   <li>{@code doc.get('f').value}</li>
+     *   <li>{@code doc.get('f').getValue()}</li>
+     * </ul>
+     * All four compile to the same runtime call chain
+     * ({@code LeafDocLookup.get(name).getValue()}), so they have identical soundness properties —
+     * missing docs throw, multi-valued docs return index 0.
+     */
     private static String extractDocField(AExpression expr) {
-        if ((expr instanceof EDot) == false) return null;
-        EDot dot = (EDot) expr;
-        if (!"value".equals(dot.getIndex())) return null;
-        AExpression prefix = dot.getPrefixNode();
-        if ((prefix instanceof EBrace) == false) return null;
-        EBrace brace = (EBrace) prefix;
-        AExpression bracePrefix = brace.getPrefixNode();
-        AExpression braceIndex = brace.getIndexNode();
-        if ((bracePrefix instanceof ESymbol) == false) return null;
-        if ("doc".equals(((ESymbol) bracePrefix).getSymbol()) == false) return null;
-        if ((braceIndex instanceof EString) == false) return null;
-        return ((EString) braceIndex).getString();
+        if (expr instanceof EDot) {
+            EDot dot = (EDot) expr;
+            if (!"value".equals(dot.getIndex())) return null;
+            return extractFieldKey(dot.getPrefixNode());
+        }
+        if (expr instanceof ECall) {
+            ECall call = (ECall) expr;
+            if ("getValue".equals(call.getMethodName()) == false) return null;
+            if (call.getArgumentNodes().isEmpty() == false) return null;
+            return extractFieldKey(call.getPrefixNode());
+        }
+        return null;
     }
 
     /**
