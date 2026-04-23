@@ -170,7 +170,7 @@ public class ScriptQueryBuilder extends AbstractQueryBuilder<ScriptQueryBuilder>
         FilterScript.Factory factory = context.compile(script, FilterScript.CONTEXT);
         ExtractedPredicate extracted = factory.extractedPredicate();
         if (extracted != null) {
-            Query rewrite = extracted.toQuery(context);
+            Query rewrite = extracted.toQuery(context, script.getParams());
             if (rewrite != null) {
                 // AbstractQueryBuilder.toQuery takes care of boost wrapping and named-query
                 // registration, so we only need to wrap in ConstantScoreQuery to match the

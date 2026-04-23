@@ -16,11 +16,14 @@ import org.opensearch.index.query.QueryShardContext;
 import org.opensearch.index.query.ScriptQueryBuilder;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.script.Script;
+import org.opensearch.script.ScriptType;
 import org.opensearch.test.OpenSearchSingleNodeTestCase;
 
 import java.io.IOException;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * End-to-end check that {@link ScriptQueryBuilder#toQuery(QueryShardContext)} actually swaps a
@@ -161,6 +164,58 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
 
         Query query = builder.toQuery(context);
         assertTrue("text field must not rewrite (analyzer divergence), got " + query, isScriptQuery(query));
+    }
+
+    public void testGuardedScriptWithParamRewritesToNativeRange() throws IOException {
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("threshold", 10L);
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(ScriptType.INLINE, "painless", "doc['price'].size() == 1 && doc['price'].value > params.threshold", params)
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("guarded param script must rewrite, got " + query, query instanceof ConstantScoreQuery);
+        Query inner = ((ConstantScoreQuery) query).getQuery();
+        assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
+    }
+
+    public void testStringValuedNumericParamFallsBackToScript() throws IOException {
+        // Painless compiles `long > Object` via DefMath.gt, which throws on Long-vs-String. The
+        // rewrite must match that semantics and decline a String-valued numeric param, not
+        // silently parse it via MappedFieldType.rangeQuery.
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("threshold", "10");
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(ScriptType.INLINE, "painless", "doc['price'].size() == 1 && doc['price'].value > params.threshold", params)
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("String-valued numeric param must stay on ScriptQuery, got " + query, isScriptQuery(query));
+    }
+
+    public void testMissingParamFallsBackToScript() throws IOException {
+        // Missing `params.threshold` at query-build time. A' resolution rule: decline so the
+        // script runs and the user sees the exception, rather than a silent match-all range.
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(
+                ScriptType.INLINE,
+                "painless",
+                "doc['price'].size() == 1 && doc['price'].value > params.threshold",
+                Collections.emptyMap()
+            )
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("missing param must stay on ScriptQuery, got " + query, isScriptQuery(query));
     }
 
     public void testUnmappedFieldFallsBackToScript() throws IOException {

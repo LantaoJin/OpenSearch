@@ -149,8 +149,13 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
             }
         }
 
-        Long lower = null;
-        Long upper = null;
+        // Accumulated bounds. Each side holds either a Long literal, a ParamRef, or null
+        // (unbounded). Bound folding at compile time can only tighten when both the existing and
+        // incoming bound are Long literals — any Long-vs-ParamRef or ParamRef-vs-ParamRef mix
+        // can't be reduced without knowing param values, so the phase declines rather than
+        // carrying a compound-bound representation that isn't needed yet.
+        Object lower = null;
+        Object upper = null;
         boolean includeLower = true;
         boolean includeUpper = true;
         String comparisonField = null;
@@ -160,10 +165,6 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
                 continue;
             }
             if (i < guardIndex) {
-                // Painless `&&` is left-associative and short-circuits left-to-right, so the
-                // guard only dominates conjuncts to its right. A comparison at a lower index
-                // would be evaluated before the guard — its `.value` read would throw on a
-                // missing doc before short-circuit protection kicked in.
                 return null;
             }
             AExpression conjunct = conjuncts.get(i);
@@ -185,24 +186,51 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
             }
             sawComparison = true;
             if (bound.lower != null) {
-                if (lower == null || bound.lower > lower) {
+                if (lower == null) {
                     lower = bound.lower;
                     includeLower = bound.includeLower;
-                } else if (bound.lower.equals(lower)) {
-                    includeLower = includeLower && bound.includeLower;
+                } else if (bound.lower instanceof Long && lower instanceof Long) {
+                    long existing = (Long) lower;
+                    long incoming = (Long) bound.lower;
+                    if (incoming > existing) {
+                        lower = bound.lower;
+                        includeLower = bound.includeLower;
+                    } else if (incoming == existing) {
+                        includeLower = includeLower && bound.includeLower;
+                    }
+                } else {
+                    // At least one side is a ParamRef — bounds can't be folded at compile time.
+                    return null;
                 }
             }
             if (bound.upper != null) {
-                if (upper == null || bound.upper < upper) {
+                if (upper == null) {
                     upper = bound.upper;
                     includeUpper = bound.includeUpper;
-                } else if (bound.upper.equals(upper)) {
-                    includeUpper = includeUpper && bound.includeUpper;
+                } else if (bound.upper instanceof Long && upper instanceof Long) {
+                    long existing = (Long) upper;
+                    long incoming = (Long) bound.upper;
+                    if (incoming < existing) {
+                        upper = bound.upper;
+                        includeUpper = bound.includeUpper;
+                    } else if (incoming == existing) {
+                        includeUpper = includeUpper && bound.includeUpper;
+                    }
+                } else {
+                    return null;
                 }
             }
             if (bound.equalTo != null) {
-                if (lower != null && (lower > bound.equalTo || (lower == bound.equalTo && includeLower == false))) return null;
-                if (upper != null && (upper < bound.equalTo || (upper == bound.equalTo && includeUpper == false))) return null;
+                if (lower != null) {
+                    if (lower instanceof Long == false) return null;
+                    long l = (Long) lower;
+                    if (l > bound.equalTo || (l == bound.equalTo && includeLower == false)) return null;
+                }
+                if (upper != null) {
+                    if (upper instanceof Long == false) return null;
+                    long u = (Long) upper;
+                    if (u < bound.equalTo || (u == bound.equalTo && includeUpper == false)) return null;
+                }
                 lower = bound.equalTo;
                 upper = bound.equalTo;
                 includeLower = true;
@@ -319,17 +347,19 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
     }
 
     /**
-     * Recognised shape of a comparison: either {@code fieldRef CMP literal} or {@code literal CMP
-     * fieldRef}, together with the canonical operator oriented field-first.
+     * Recognised shape of a comparison: either {@code fieldRef CMP operand} or {@code operand CMP
+     * fieldRef}, together with the canonical operator oriented field-first. The operand is either
+     * a {@link Long} literal or an {@link ExtractedPredicate.ParamRef} captured from a
+     * {@code params.<name>} reference.
      */
     private static final class ComparisonShape {
         final String field;
-        final long literal;
-        final Operation op; // always expressed as `field OP literal`
+        final Object operand; // Long or ExtractedPredicate.ParamRef
+        final Operation op; // always expressed as `field OP operand`
 
-        ComparisonShape(String field, long literal, Operation op) {
+        ComparisonShape(String field, Object operand, Operation op) {
             this.field = field;
-            this.literal = literal;
+            this.operand = operand;
             this.op = op;
         }
 
@@ -340,14 +370,14 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
                 return null;
             }
             String leftField = extractDocField(comp.getLeftNode());
-            Long rightLit = extractLongLiteral(comp.getRightNode());
-            if (leftField != null && rightLit != null) {
-                return new ComparisonShape(leftField, rightLit, op);
+            Object rightOp = extractNumericOperand(comp.getRightNode());
+            if (leftField != null && rightOp != null) {
+                return new ComparisonShape(leftField, rightOp, op);
             }
             String rightField = extractDocField(comp.getRightNode());
-            Long leftLit = extractLongLiteral(comp.getLeftNode());
-            if (rightField != null && leftLit != null) {
-                return new ComparisonShape(rightField, leftLit, flip(op));
+            Object leftOp = extractNumericOperand(comp.getLeftNode());
+            if (rightField != null && leftOp != null) {
+                return new ComparisonShape(rightField, leftOp, flip(op));
             }
             return null;
         }
@@ -371,10 +401,12 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
         }
     }
 
-    /** Intermediate bound produced by a single comparison. */
+    /** Intermediate bound produced by a single comparison. Bounds are either {@link Long} or
+     *  {@link ExtractedPredicate.ParamRef}; equalTo (from {@code ==}) must be a Long because an
+     *  equality-against-a-param would need a Term carrier and is out of scope for Range here. */
     private static final class Bound {
-        Long lower;
-        Long upper;
+        Object lower;
+        Object upper;
         Long equalTo;
         boolean includeLower;
         boolean includeUpper;
@@ -387,23 +419,28 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
         Bound b = new Bound();
         switch (shape.op) {
             case GT:
-                b.lower = shape.literal;
+                b.lower = shape.operand;
                 b.includeLower = false;
                 break;
             case GTE:
-                b.lower = shape.literal;
+                b.lower = shape.operand;
                 b.includeLower = true;
                 break;
             case LT:
-                b.upper = shape.literal;
+                b.upper = shape.operand;
                 b.includeUpper = false;
                 break;
             case LTE:
-                b.upper = shape.literal;
+                b.upper = shape.operand;
                 b.includeUpper = true;
                 break;
             case EQ:
-                b.equalTo = shape.literal;
+                // Range.equalTo must be a compile-time literal; `doc['f'].value == params.x` would
+                // need a Term carrier with a ParamRef value (deferred).
+                if (shape.operand instanceof Long == false) {
+                    return null;
+                }
+                b.equalTo = (Long) shape.operand;
                 break;
             case NE:
                 // Representable as OR(range(<lit), range(>lit)); out of scope for the MVP.
@@ -428,6 +465,33 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
         if ("doc".equals(((ESymbol) bracePrefix).getSymbol()) == false) return null;
         if ((braceIndex instanceof EString) == false) return null;
         return ((EString) braceIndex).getString();
+    }
+
+    /**
+     * Match either a long literal or a {@code params.<name>} reference on the non-field side of a
+     * numeric comparison. Returns a {@link Long} or an {@link ExtractedPredicate.ParamRef};
+     * {@code null} means the operand is neither and extraction must decline.
+     */
+    private static Object extractNumericOperand(AExpression expr) {
+        ExtractedPredicate.ParamRef paramRef = extractParamRef(expr);
+        if (paramRef != null) {
+            return paramRef;
+        }
+        return extractLongLiteral(expr);
+    }
+
+    /**
+     * Match {@code params.<name>} and return a ParamRef for it. Declines nested access
+     * ({@code params.x.y}), dynamic lookups ({@code params[key]}), and anything that isn't an
+     * {@link EDot} with {@code ESymbol("params")} as its prefix.
+     */
+    private static ExtractedPredicate.ParamRef extractParamRef(AExpression expr) {
+        if ((expr instanceof EDot) == false) return null;
+        EDot dot = (EDot) expr;
+        AExpression prefix = dot.getPrefixNode();
+        if ((prefix instanceof ESymbol) == false) return null;
+        if ("params".equals(((ESymbol) prefix).getSymbol()) == false) return null;
+        return new ExtractedPredicate.ParamRef(dot.getIndex());
     }
 
     /** Match an integer / long literal and return its Long value. Declines decimals and hex. */

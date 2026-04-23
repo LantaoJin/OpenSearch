@@ -14,6 +14,8 @@ import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.query.QueryShardContext;
 
+import java.util.Collections;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -39,18 +41,43 @@ public abstract class ExtractedPredicate {
     public abstract Query toQuery(QueryShardContext context);
 
     /**
-     * A half- or fully-bounded range predicate on a single field. Bounds use {@link Long} to cover
-     * numeric comparisons emitted by the Painless predicate-extraction phase. Either bound may be
-     * {@code null} to mean unbounded in that direction.
+     * Convert the predicate to a native Lucene {@link Query}, resolving any {@link ParamRef}
+     * bounds against the supplied runtime {@code params} map. Implementations that embed
+     * {@link ParamRef}s must override this and follow the hybrid resolution rule:
+     * <ul>
+     *   <li>If a referenced param is missing ({@code params.get(name) == null}), return
+     *       {@code null} and let the caller fall back to the script. This preserves the
+     *       throw-on-missing semantics Painless would have produced, so user bugs surface
+     *       loudly instead of silently matching the wrong document set.</li>
+     *   <li>If the param value is a {@link Number}, pass it through to the field type's query
+     *       factory.</li>
+     *   <li>Anything else (String, Boolean, List, …) declines rewriting. Painless compiles the
+     *       comparison to a Def-dispatched {@code DefMath.gt(Object, Object)} (and friends),
+     *       which throws {@link ClassCastException} on non-numeric/non-Character operands — so
+     *       a rewrite that accepted those types would be silently more permissive than the
+     *       script it replaced.</li>
+     * </ul>
+     * The default implementation ignores {@code params} and delegates to {@link
+     * #toQuery(QueryShardContext)} — correct for predicates that don't hold any {@link ParamRef}.
+     */
+    public Query toQuery(QueryShardContext context, Map<String, Object> params) {
+        return toQuery(context);
+    }
+
+    /**
+     * A half- or fully-bounded range predicate on a single field. Bounds are {@link Object} so
+     * they can hold either a compile-time {@link Long} literal or a {@link ParamRef} placeholder
+     * that resolves against the runtime {@code params} map at {@link #toQuery(QueryShardContext,
+     * Map)} time. Either bound may be {@code null} to mean unbounded in that direction.
      */
     public static final class Range extends ExtractedPredicate {
         private final String field;
-        private final Long lower;
-        private final Long upper;
+        private final Object lower;
+        private final Object upper;
         private final boolean includeLower;
         private final boolean includeUpper;
 
-        public Range(String field, Long lower, Long upper, boolean includeLower, boolean includeUpper) {
+        public Range(String field, Object lower, Object upper, boolean includeLower, boolean includeUpper) {
             this.field = Objects.requireNonNull(field, "field");
             this.lower = lower;
             this.upper = upper;
@@ -62,11 +89,11 @@ public abstract class ExtractedPredicate {
             return field;
         }
 
-        public Long lower() {
+        public Object lower() {
             return lower;
         }
 
-        public Long upper() {
+        public Object upper() {
             return upper;
         }
 
@@ -80,12 +107,34 @@ public abstract class ExtractedPredicate {
 
         @Override
         public Query toQuery(QueryShardContext context) {
+            return toQuery(context, Collections.emptyMap());
+        }
+
+        @Override
+        public Query toQuery(QueryShardContext context, Map<String, Object> params) {
             MappedFieldType fieldType = context.fieldMapper(field);
             if (fieldType == null) {
                 return null;
             }
+            Object resolvedLower = resolveBound(lower, params);
+            if (resolvedLower == UNRESOLVABLE) {
+                return null;
+            }
+            Object resolvedUpper = resolveBound(upper, params);
+            if (resolvedUpper == UNRESOLVABLE) {
+                return null;
+            }
             try {
-                return fieldType.rangeQuery(lower, upper, includeLower, includeUpper, null, null, null, context);
+                return fieldType.rangeQuery(
+                    resolvedLower,
+                    resolvedUpper,
+                    includeLower,
+                    includeUpper,
+                    null,
+                    null,
+                    null,
+                    context
+                );
             } catch (IllegalArgumentException | UnsupportedOperationException e) {
                 // Field type doesn't support range queries, or the bounds don't parse against this
                 // field type. In either case fall back to the script.
@@ -125,6 +174,76 @@ public abstract class ExtractedPredicate {
                 + ", includeUpper="
                 + includeUpper
                 + '}';
+        }
+    }
+
+    /**
+     * Sentinel returned by {@link #resolveBound} when a bound can't be used. Distinct from
+     * {@code null}, which means "no bound in this direction" and is always valid.
+     */
+    private static final Object UNRESOLVABLE = new Object();
+
+    /**
+     * Resolve a Range bound to an object suitable for {@link MappedFieldType#rangeQuery}. Literal
+     * bounds pass through; {@link ParamRef}s look up their value in {@code params}. Returns the
+     * {@link #UNRESOLVABLE} sentinel when a ParamRef can't be resolved safely — the caller must
+     * then return {@code null} so the script runs and surfaces the user's bug. See the
+     * hybrid-resolution documentation on {@link #toQuery(QueryShardContext, Map)}.
+     */
+    private static Object resolveBound(Object bound, Map<String, Object> params) {
+        if (bound instanceof ParamRef == false) {
+            return bound;
+        }
+        Object value = params.get(((ParamRef) bound).name());
+        if (value == null) {
+            // Missing param: Painless would have thrown on the first doc. Decline so the script
+            // runs and the user sees the exception instead of a silently wrong match-all range.
+            return UNRESOLVABLE;
+        }
+        if (value instanceof Number) {
+            return value;
+        }
+        // Anything else is refused even though some types (e.g. numeric String) would parse fine
+        // inside MappedFieldType.rangeQuery. The script path itself doesn't accept them — Painless
+        // compiles `long > Object` through DefMath.gt(Object, Object), which throws
+        // ClassCastException on e.g. Long-vs-String / Long-vs-Boolean / Long-vs-List — so a
+        // rewrite that did accept them would be silently more permissive than the script. Decline
+        // and let the script run so the user sees the same error it would have thrown.
+        return UNRESOLVABLE;
+    }
+
+    /**
+     * A placeholder for a script-level {@code params.<name>} reference that the Painless
+     * predicate-extraction phase captured at compile time. {@link Range} holds one of these in
+     * place of a literal bound; {@link Range#toQuery(QueryShardContext, Map)} resolves it at
+     * query-build time against the runtime params map.
+     */
+    public static final class ParamRef {
+        private final String name;
+
+        public ParamRef(String name) {
+            this.name = Objects.requireNonNull(name, "name");
+        }
+
+        public String name() {
+            return name;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if ((o instanceof ParamRef) == false) return false;
+            return name.equals(((ParamRef) o).name);
+        }
+
+        @Override
+        public int hashCode() {
+            return name.hashCode();
+        }
+
+        @Override
+        public String toString() {
+            return "params." + name;
         }
     }
 

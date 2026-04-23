@@ -234,6 +234,81 @@ public class PredicateExtractionPhaseTests extends ScriptTestCase {
         assertNull(extract("doc['status'].size() == 1 && doc['status'].value == 'active' && doc['status'].value == 'x'"));
     }
 
+    // --- guarded numeric range with params.x on a bound --------------------
+
+    public void testGuardedGreaterThanParam() {
+        ExtractedPredicate.Range r = (ExtractedPredicate.Range) extract(
+            "doc['price'].size() == 1 && doc['price'].value > params.threshold"
+        );
+        assertNotNull(r);
+        assertEquals("price", r.field());
+        assertEquals(new ExtractedPredicate.ParamRef("threshold"), r.lower());
+        assertNull(r.upper());
+        assertFalse(r.includeLower());
+    }
+
+    public void testGuardedBoundedRangeBothParams() {
+        ExtractedPredicate.Range r = (ExtractedPredicate.Range) extract(
+            "doc['price'].size() == 1 && doc['price'].value > params.low && doc['price'].value < params.high"
+        );
+        assertNotNull(r);
+        assertEquals(new ExtractedPredicate.ParamRef("low"), r.lower());
+        assertEquals(new ExtractedPredicate.ParamRef("high"), r.upper());
+        assertFalse(r.includeLower());
+        assertFalse(r.includeUpper());
+    }
+
+    public void testGuardedBoundedRangeMixedLiteralAndParam() {
+        // Literal on one side, param on the other — different sides, so folding is unambiguous.
+        ExtractedPredicate.Range r = (ExtractedPredicate.Range) extract(
+            "doc['price'].size() == 1 && doc['price'].value > 10 && doc['price'].value < params.max"
+        );
+        assertNotNull(r);
+        assertEquals(Long.valueOf(10L), r.lower());
+        assertEquals(new ExtractedPredicate.ParamRef("max"), r.upper());
+    }
+
+    public void testGuardedParamLiteralOnLeft() {
+        // `params.threshold < doc['price'].value` — param on the left of the comparison, which
+        // the existing flip logic orients field-first.
+        ExtractedPredicate.Range r = (ExtractedPredicate.Range) extract(
+            "doc['price'].size() == 1 && params.threshold < doc['price'].value"
+        );
+        assertNotNull(r);
+        assertEquals(new ExtractedPredicate.ParamRef("threshold"), r.lower());
+        assertFalse(r.includeLower());
+    }
+
+    public void testDeclineParamOnBothSidesOfOneComparison() {
+        // `params.a > params.b` has no field reference; not a valid comparison shape.
+        assertNull(extract("doc['price'].size() == 1 && params.a < params.b"));
+    }
+
+    public void testDeclineWhenLiteralAndParamShareSameBoundSide() {
+        // `> 10 && > params.low` — can't fold at compile time without knowing params.low. Phase
+        // declines rather than guessing.
+        assertNull(extract("doc['price'].size() == 1 && doc['price'].value > 10 && doc['price'].value > params.low"));
+    }
+
+    public void testDeclineWhenTwoParamsShareSameBoundSide() {
+        assertNull(extract("doc['price'].size() == 1 && doc['price'].value > params.a && doc['price'].value > params.b"));
+    }
+
+    public void testDeclineEqualityAgainstParam() {
+        // `.value == params.x` would need a Term carrier holding a ParamRef value — deferred.
+        assertNull(extract("doc['price'].size() == 1 && doc['price'].value == params.x"));
+    }
+
+    public void testDeclineUnguardedParamComparison() {
+        assertNull(extract("doc['price'].value > params.threshold"));
+    }
+
+    public void testDeclineParamNestedAccess() {
+        // `params.thresholds[0]` isn't an EDot(ESymbol("params"), name); the matcher only accepts
+        // the flat shape.
+        assertNull(extract("doc['price'].size() == 1 && doc['price'].value > params.thresholds[0]"));
+    }
+
     // --- other negative cases (must decline extraction) ---------------------
 
     public void testDeclineOnLogicalOr() {
