@@ -36,6 +36,7 @@ import org.opensearch.painless.CompilerSettings;
 import org.opensearch.painless.ScriptClassInfo;
 import org.opensearch.painless.lookup.PainlessLookup;
 import org.opensearch.painless.node.ANode;
+import org.opensearch.script.ExtractedPredicate;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -63,6 +64,7 @@ public class ScriptScope extends Decorator {
     protected List<String> docFields = new ArrayList<>();
     protected Set<String> usedVariables = Collections.emptySet();
     protected Map<String, Object> staticConstants = new HashMap<>();
+    protected ExtractedPredicate extractedPredicate;
 
     public ScriptScope(
         PainlessLookup painlessLookup,
@@ -136,6 +138,18 @@ public class ScriptScope extends Decorator {
 
     public void addDocField(String field) {
         docFields.add(field);
+    }
+
+    /**
+     * A structured predicate extracted from the script, or {@code null} if none was extracted.
+     * Filled in by {@link org.opensearch.painless.phase.PredicateExtractionPhase}.
+     */
+    public ExtractedPredicate getExtractedPredicate() {
+        return extractedPredicate;
+    }
+
+    public void setExtractedPredicate(ExtractedPredicate extractedPredicate) {
+        this.extractedPredicate = extractedPredicate;
     }
 
     public void setUsedVariables(Set<String> usedVariables) {

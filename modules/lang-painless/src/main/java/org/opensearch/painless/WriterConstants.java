@@ -43,9 +43,11 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -232,6 +234,12 @@ public final class WriterConstants {
 
     public static final Type ARRAY_LIST_TYPE = Type.getType(ArrayList.class);
     public static final Method ARRAY_LIST_CTOR_WITH_SIZE = getAsmMethod(void.class, CTOR_METHOD_NAME, int.class);
+
+    public static final Type SET_TYPE = Type.getType(Set.class);
+    public static final Method SET_ADD = getAsmMethod(boolean.class, "add", Object.class);
+
+    public static final Type HASH_SET_TYPE = Type.getType(HashSet.class);
+    public static final Method HASH_SET_CTOR_WITH_SIZE = getAsmMethod(void.class, CTOR_METHOD_NAME, int.class);
 
     private static Method getAsmMethod(final Class<?> rtype, final String name, final Class<?>... ptypes) {
         return new Method(name, MethodType.methodType(rtype, ptypes).toMethodDescriptorString());

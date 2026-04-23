@@ -39,6 +39,7 @@ import org.opensearch.painless.lookup.PainlessLookup;
 import org.opensearch.painless.lookup.PainlessLookupBuilder;
 import org.opensearch.painless.spi.Allowlist;
 import org.opensearch.painless.symbol.ScriptScope;
+import org.opensearch.script.ExtractedPredicate;
 import org.opensearch.script.ScriptContext;
 import org.opensearch.script.ScriptEngine;
 import org.opensearch.script.ScriptException;
@@ -302,6 +303,8 @@ public final class PainlessScriptEngine implements ScriptEngine {
 
         Method reflect = null;
         Method docFieldsReflect = null;
+        Method accessedDocFieldsReflect = null;
+        Method extractedPredicateReflect = null;
 
         for (Method method : context.factoryClazz.getMethods()) {
             if ("newInstance".equals(method.getName())) {
@@ -310,7 +313,15 @@ public final class PainlessScriptEngine implements ScriptEngine {
                 reflect = method;
             } else if ("docFields".equals(method.getName())) {
                 docFieldsReflect = method;
-            }
+            } else if ("accessedDocFields".equals(method.getName())
+                && method.getParameterCount() == 0
+                && Set.class.isAssignableFrom(method.getReturnType())) {
+                    accessedDocFieldsReflect = method;
+                } else if ("extractedPredicate".equals(method.getName())
+                    && method.getParameterCount() == 0
+                    && method.getReturnType().isAssignableFrom(ExtractedPredicate.class)) {
+                        extractedPredicateReflect = method;
+                    }
         }
 
         final Class<?>[] parameterTypes = reflect.getParameterTypes();
@@ -385,10 +396,75 @@ public final class PainlessScriptEngine implements ScriptEngine {
             docAdapter.endMethod();
         }
 
+        if (accessedDocFieldsReflect != null) {
+            org.objectweb.asm.commons.Method accessedDocFields = new org.objectweb.asm.commons.Method(
+                accessedDocFieldsReflect.getName(),
+                MethodType.methodType(Set.class).toMethodDescriptorString()
+            );
+            GeneratorAdapter setAdapter = new GeneratorAdapter(
+                Opcodes.ASM5,
+                accessedDocFields,
+                writer.visitMethod(Opcodes.ACC_PUBLIC, accessedDocFieldsReflect.getName(), accessedDocFields.getDescriptor(), null, null)
+            );
+            setAdapter.visitCode();
+            List<String> fields = scriptScope.docFields();
+            setAdapter.newInstance(WriterConstants.HASH_SET_TYPE);
+            setAdapter.dup();
+            // HashSet(int) expects initial capacity, not size.
+            setAdapter.push(Math.max(fields.size(), 1));
+            setAdapter.invokeConstructor(WriterConstants.HASH_SET_TYPE, WriterConstants.HASH_SET_CTOR_WITH_SIZE);
+            for (String field : fields) {
+                setAdapter.dup();
+                setAdapter.push(field);
+                setAdapter.invokeInterface(WriterConstants.SET_TYPE, WriterConstants.SET_ADD);
+                setAdapter.pop(); // Don't want the result of calling add
+            }
+            setAdapter.returnValue();
+            setAdapter.endMethod();
+        }
+
+        final String extractedPredicateFieldName = "$extractedPredicate";
+        if (extractedPredicateReflect != null) {
+            Type predicateType = Type.getType(ExtractedPredicate.class);
+
+            // public static ExtractedPredicate $extractedPredicate;
+            writer.visitField(
+                Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+                extractedPredicateFieldName,
+                predicateType.getDescriptor(),
+                null,
+                null
+            ).visitEnd();
+
+            // ExtractedPredicate extractedPredicate() { return $extractedPredicate; }
+            org.objectweb.asm.commons.Method extractedPredicateMethod = new org.objectweb.asm.commons.Method(
+                extractedPredicateReflect.getName(),
+                MethodType.methodType(ExtractedPredicate.class).toMethodDescriptorString()
+            );
+            GeneratorAdapter predicateAdapter = new GeneratorAdapter(
+                Opcodes.ASM5,
+                extractedPredicateMethod,
+                writer.visitMethod(
+                    Opcodes.ACC_PUBLIC,
+                    extractedPredicateMethod.getName(),
+                    extractedPredicateMethod.getDescriptor(),
+                    null,
+                    null
+                )
+            );
+            predicateAdapter.visitCode();
+            predicateAdapter.getStatic(Type.getObjectType(className), extractedPredicateFieldName, predicateType);
+            predicateAdapter.returnValue();
+            predicateAdapter.endMethod();
+        }
+
         writer.visitEnd();
         Class<?> factory = loader.defineFactory(className.replace('/', '.'), writer.toByteArray());
 
         try {
+            if (extractedPredicateReflect != null) {
+                factory.getField(extractedPredicateFieldName).set(null, scriptScope.getExtractedPredicate());
+            }
             return context.factoryClazz.cast(factory.getConstructor().newInstance());
         } catch (Exception exception) {
             // Catch everything to let the user know this is something caused internally.

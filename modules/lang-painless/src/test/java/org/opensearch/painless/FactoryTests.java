@@ -44,8 +44,10 @@ import org.junit.BeforeClass;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.hamcrest.Matchers.equalTo;
 
@@ -64,6 +66,7 @@ public class FactoryTests extends ScriptTestCase {
         contexts.put(FactoryTestConverterScript.CONTEXT, Allowlist.BASE_ALLOWLISTS);
         contexts.put(FactoryTestConverterScriptBadDef.CONTEXT, Allowlist.BASE_ALLOWLISTS);
         contexts.put(DocFieldsTestScript.CONTEXT, Allowlist.BASE_ALLOWLISTS);
+        contexts.put(AccessedDocFieldsTestScript.CONTEXT, Allowlist.BASE_ALLOWLISTS);
         SCRIPT_ENGINE = new PainlessScriptEngine(Settings.EMPTY, contexts);
     }
 
@@ -621,5 +624,59 @@ public class FactoryTests extends ScriptTestCase {
         );
         assertThat(f.docFields(), equalTo(Arrays.asList("cat", "dog")));
         assertThat(f.newInstance().execute(), equalTo("meowwoof"));
+    }
+
+    public abstract static class AccessedDocFieldsTestScript {
+        public static final ScriptContext<AccessedDocFieldsTestScript.Factory> CONTEXT = new ScriptContext<>(
+            "test",
+            AccessedDocFieldsTestScript.Factory.class
+        );
+
+        public interface Factory {
+            AccessedDocFieldsTestScript newInstance();
+
+            Set<String> accessedDocFields();
+        }
+
+        public static final String[] PARAMETERS = new String[] {};
+
+        public abstract String execute();
+
+        public final Map<String, String> getDoc() {
+            Map<String, String> doc = new HashMap<>();
+            doc.put("cat", "meow");
+            doc.put("dog", "woof");
+            return doc;
+        }
+    }
+
+    public void testAccessedDocFieldsSingle() {
+        AccessedDocFieldsTestScript.Factory f = getEngine().compile(
+            "test",
+            "doc['cat']",
+            AccessedDocFieldsTestScript.CONTEXT,
+            Collections.emptyMap()
+        );
+        assertThat(f.accessedDocFields(), equalTo(Collections.singleton("cat")));
+    }
+
+    public void testAccessedDocFieldsMulti() {
+        AccessedDocFieldsTestScript.Factory f = getEngine().compile(
+            "test",
+            "doc['cat'] + doc['dog']",
+            AccessedDocFieldsTestScript.CONTEXT,
+            Collections.emptyMap()
+        );
+        assertThat(f.accessedDocFields(), equalTo(new HashSet<>(Arrays.asList("cat", "dog"))));
+    }
+
+    public void testAccessedDocFieldsNone() {
+        AccessedDocFieldsTestScript.Factory f = getEngine().compile(
+            "test",
+            "'meow'",
+            AccessedDocFieldsTestScript.CONTEXT,
+            Collections.emptyMap()
+        );
+        assertThat(f.accessedDocFields(), equalTo(Collections.emptySet()));
     }
 }

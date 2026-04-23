@@ -43,6 +43,7 @@ import org.opensearch.painless.phase.DocFieldsPhase;
 import org.opensearch.painless.phase.PainlessSemanticAnalysisPhase;
 import org.opensearch.painless.phase.PainlessSemanticHeaderPhase;
 import org.opensearch.painless.phase.PainlessUserTreeToIRTreePhase;
+import org.opensearch.painless.phase.PredicateExtractionPhase;
 import org.opensearch.painless.spi.Allowlist;
 import org.opensearch.painless.symbol.Decorations.IRNodeDecoration;
 import org.opensearch.painless.symbol.ScriptScope;
@@ -234,6 +235,7 @@ final class Compiler {
         new PainlessSemanticAnalysisPhase().visitClass(root, scriptScope);
         // TODO: Make this phase optional #60156
         new DocFieldsPhase().visitClass(root, scriptScope);
+        new PredicateExtractionPhase().visitClass(root, scriptScope);
         new PainlessUserTreeToIRTreePhase().visitClass(root, scriptScope);
         ClassNode classNode = (ClassNode) scriptScope.getDecoration(root, IRNodeDecoration.class).getIRNode();
         new DefaultStringConcatenationOptimizationPhase().visitClass(classNode, null);
@@ -269,6 +271,7 @@ final class Compiler {
         new PainlessSemanticAnalysisPhase().visitClass(root, scriptScope);
         // TODO: Make this phase optional #60156
         new DocFieldsPhase().visitClass(root, scriptScope);
+        new PredicateExtractionPhase().visitClass(root, scriptScope);
         new PainlessUserTreeToIRTreePhase().visitClass(root, scriptScope);
         ClassNode classNode = (ClassNode) scriptScope.getDecoration(root, IRNodeDecoration.class).getIRNode();
         new DefaultStringConcatenationOptimizationPhase().visitClass(classNode, null);

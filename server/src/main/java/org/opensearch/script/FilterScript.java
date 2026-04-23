@@ -37,7 +37,9 @@ import org.opensearch.search.lookup.LeafSearchLookup;
 import org.opensearch.search.lookup.SearchLookup;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * A script implementation of a query filter.
@@ -95,6 +97,27 @@ public abstract class FilterScript {
      */
     public interface Factory extends ScriptFactory {
         LeafFactory newFactory(Map<String, Object> params, SearchLookup lookup);
+
+        /**
+         * Names of doc-value fields accessed via a constant key, e.g. the {@code price} in
+         * {@code doc['price'].value}. Returns an empty set when the script engine cannot
+         * introspect the script or when the script uses dynamic field keys. This is a
+         * best-effort hint that the query layer can use to pick a cheaper approximation
+         * iterator; an empty set never changes correctness, only performance.
+         */
+        default Set<String> accessedDocFields() {
+            return Collections.emptySet();
+        }
+
+        /**
+         * A structured predicate extracted from the compiled script, or {@code null} if the engine
+         * cannot or chose not to extract one. The query layer may rewrite the script query to a
+         * native Lucene query based on the returned value; {@code null} always falls back to
+         * normal script evaluation.
+         */
+        default ExtractedPredicate extractedPredicate() {
+            return null;
+        }
     }
 
     /** The context used to compile {@link FilterScript} factories. */
