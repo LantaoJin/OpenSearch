@@ -297,6 +297,135 @@ public class ExtractedPredicateTests extends OpenSearchTestCase {
         assertNotEquals(a, d);
     }
 
+    public void testTermsRoutesToFieldType() {
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        Query expected = new MatchAllDocsQuery();
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+        java.util.List<Object> values = java.util.Arrays.asList("active", "pending");
+        doReturn(expected).when(fieldType).termsQuery(values, context);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Terms("status", values);
+        Query actual = predicate.toQuery(context);
+
+        assertSame(expected, actual);
+        verify(fieldType).termsQuery(values, context);
+    }
+
+    public void testTermsDeclinesForNonKeywordFieldType() {
+        QueryShardContext context = mock(QueryShardContext.class);
+        MappedFieldType notKeyword = mock(MappedFieldType.class);
+        when(context.fieldMapper("title")).thenReturn(notKeyword);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Terms("title", java.util.Arrays.asList("a", "b"));
+        assertNull(predicate.toQuery(context));
+        verify(notKeyword, org.mockito.Mockito.never()).termsQuery(any(), any());
+    }
+
+    public void testTermsDeclinesForKeywordWithNormalizer() {
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        NamedAnalyzer normalizer = new NamedAnalyzer(
+            "lowercase",
+            org.opensearch.index.analysis.AnalyzerScope.INDEX,
+            new org.apache.lucene.analysis.core.WhitespaceAnalyzer()
+        );
+        org.apache.lucene.document.FieldType luceneFieldType = new org.apache.lucene.document.FieldType();
+        luceneFieldType.setTokenized(false);
+        luceneFieldType.setOmitNorms(true);
+        luceneFieldType.freeze();
+        doReturn(new TextSearchInfo(luceneFieldType, null, normalizer, normalizer)).when(fieldType).getTextSearchInfo();
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+
+        assertNull(new ExtractedPredicate.Terms("status", java.util.Arrays.asList("Active", "Pending")).toQuery(context));
+        verify(fieldType, org.mockito.Mockito.never()).termsQuery(any(), any());
+    }
+
+    public void testTermDeclinesForNonStringLiteralValue() {
+        // Defense-in-depth: the Term constructor takes a raw Object. If a third-party factory
+        // (or a future phase change) hands us a Number or other non-String, the rewrite must
+        // decline rather than stringify via BytesRefs.toBytesRef and silently match a keyword
+        // whose indexed bytes equal that stringification.
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+
+        assertNull(new ExtractedPredicate.Term("status", 123).toQuery(context));
+        assertNull(new ExtractedPredicate.Term("status", Boolean.TRUE).toQuery(context));
+        verify(fieldType, org.mockito.Mockito.never()).termQuery(any(), any());
+    }
+
+    public void testTermsPerElementResolution() {
+        // A homogeneous String list passes through unchanged.
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        Query expected = new MatchAllDocsQuery();
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+        java.util.List<Object> values = java.util.Arrays.asList("active", "pending");
+        doReturn(expected).when(fieldType).termsQuery(values, context);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Terms("status", values);
+        assertSame(expected, predicate.toQuery(context, Collections.emptyMap()));
+    }
+
+    public void testTermsResolvesParamRefElements() {
+        // String literal mixed with a ParamRef that resolves to a String — both should flow
+        // through to termsQuery as Strings.
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        Query expected = new MatchAllDocsQuery();
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+        java.util.List<Object> resolvedExpected = java.util.Arrays.asList("active", "pending");
+        doReturn(expected).when(fieldType).termsQuery(resolvedExpected, context);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Terms(
+            "status",
+            java.util.Arrays.asList("active", new ExtractedPredicate.ParamRef("second"))
+        );
+        assertSame(expected, predicate.toQuery(context, Collections.singletonMap("second", "pending")));
+    }
+
+    public void testTermsDeclinesWhenAnyElementIsNonString() {
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+
+        assertNull(
+            new ExtractedPredicate.Terms("status", java.util.Arrays.asList("active", 123)).toQuery(context)
+        );
+        assertNull(
+            new ExtractedPredicate.Terms("status", java.util.Arrays.asList(Boolean.TRUE)).toQuery(context)
+        );
+        verify(fieldType, org.mockito.Mockito.never()).termsQuery(any(), any());
+    }
+
+    public void testTermsDeclinesWhenAnyParamRefElementMissingOrNonString() {
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Terms(
+            "status",
+            java.util.Arrays.asList("active", new ExtractedPredicate.ParamRef("second"))
+        );
+        // Missing param → decline.
+        assertNull(predicate.toQuery(context, Collections.emptyMap()));
+        // Non-String param → decline.
+        assertNull(predicate.toQuery(context, Collections.singletonMap("second", 42)));
+        verify(fieldType, org.mockito.Mockito.never()).termsQuery(any(), any());
+    }
+
+    public void testTermsEqualsAndHashCode() {
+        ExtractedPredicate.Terms a = new ExtractedPredicate.Terms("status", java.util.Arrays.asList("active", "pending"));
+        ExtractedPredicate.Terms b = new ExtractedPredicate.Terms("status", java.util.Arrays.asList("active", "pending"));
+        ExtractedPredicate.Terms c = new ExtractedPredicate.Terms("status", java.util.Arrays.asList("active"));
+        ExtractedPredicate.Terms d = new ExtractedPredicate.Terms("tier", java.util.Arrays.asList("active", "pending"));
+        assertEquals(a, b);
+        assertEquals(a.hashCode(), b.hashCode());
+        assertNotEquals(a, c);
+        assertNotEquals(a, d);
+    }
+
     public void testEqualsAndHashCode() {
         ExtractedPredicate.Range a = new ExtractedPredicate.Range("price", 1L, 10L, true, false);
         ExtractedPredicate.Range b = new ExtractedPredicate.Range("price", 1L, 10L, true, false);

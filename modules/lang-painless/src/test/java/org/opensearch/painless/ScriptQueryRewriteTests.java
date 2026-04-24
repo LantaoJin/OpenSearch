@@ -148,6 +148,39 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
     }
 
+    public void testGuardedListContainsRewritesToTerms() throws IOException {
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc['status'].size() == 1 && ['active', 'pending'].contains(doc['status'].value)")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("guarded list.contains must rewrite, got " + query, query instanceof ConstantScoreQuery);
+        Query inner = ((ConstantScoreQuery) query).getQuery();
+        assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
+    }
+
+    public void testListContainsOnNormalizedKeywordStaysOnScriptQuery() throws IOException {
+        // Same normalizer divergence that blocks the Term rewrite applies to Terms: a normalizer
+        // would lowercase each list element, so `['Active']` would match docs storing `active`
+        // even though Painless' `.equals()` against the raw value returns false.
+        Settings settings = Settings.builder().putList("index.analysis.normalizer.my_lower.filter", "lowercase").build();
+        IndexService index = createIndexWithSimpleMappings("idx", settings, "status", "type=keyword,normalizer=my_lower");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc['status'].size() == 1 && ['Active'].contains(doc['status'].value)")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue(
+            "list.contains on normalized keyword must stay on ScriptQuery, got " + query,
+            isScriptQuery(query)
+        );
+    }
+
     public void testKeywordWithNormalizerStaysOnScriptQuery() throws IOException {
         // Regression guard for semantic divergence on normalized keyword mappings. A `lowercase`
         // normalizer lowercases the search literal before lookup, so `termQuery('Active')`

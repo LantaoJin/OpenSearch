@@ -407,4 +407,76 @@ public class PredicateExtractionPhaseTests extends ScriptTestCase {
     public void testDeclineOnMultipleStatements() {
         assertNull(extract("def x = 1; return doc['price'].value > 10;"));
     }
+
+    // --- list.contains(doc.value) → Terms ----------------------------------
+
+    public void testGuardedListContains() {
+        ExtractedPredicate.Terms t = (ExtractedPredicate.Terms) extract(
+            "doc['status'].size() == 1 && ['active', 'pending'].contains(doc['status'].value)"
+        );
+        assertNotNull(t);
+        assertEquals("status", t.field());
+        assertEquals(java.util.Arrays.asList("active", "pending"), t.values());
+    }
+
+    public void testGuardedListContainsSingleElement() {
+        ExtractedPredicate.Terms t = (ExtractedPredicate.Terms) extract(
+            "doc['status'].size() == 1 && ['active'].contains(doc['status'].value)"
+        );
+        assertNotNull(t);
+        assertEquals(java.util.Arrays.asList("active"), t.values());
+    }
+
+    public void testGuardedListContainsEmptyList() {
+        // `[].contains(x)` is always false in Painless. Rewrite to termsQuery with an empty list,
+        // which MappedFieldType's default renders as a BooleanQuery with no SHOULD clauses —
+        // match-nothing. Same result, no semantic change.
+        ExtractedPredicate.Terms t = (ExtractedPredicate.Terms) extract(
+            "doc['status'].size() == 1 && [].contains(doc['status'].value)"
+        );
+        assertNotNull(t);
+        assertTrue(t.values().isEmpty());
+    }
+
+    public void testGuardedListContainsWithAltSpelling() {
+        // Argument uses `doc.get('f').value` instead of `doc['f'].value`. extractDocField
+        // already canonicalizes both spellings.
+        ExtractedPredicate.Terms t = (ExtractedPredicate.Terms) extract(
+            "doc['status'].size() == 1 && ['active'].contains(doc.get('status').value)"
+        );
+        assertNotNull(t);
+        assertEquals(java.util.Arrays.asList("active"), t.values());
+    }
+
+    public void testDeclineListContainsWithNonStringElement() {
+        // Numeric element: Painless walks the list with `1.equals(docValue)`, always false for a
+        // String docValue. Rewrite would stringify to "1" and match a doc with keyword "1" —
+        // silently more permissive. Decline.
+        assertNull(extract("doc['status'].size() == 1 && ['active', 1].contains(doc['status'].value)"));
+    }
+
+    public void testDeclineListContainsWithNonLiteralElement() {
+        // `String v = 'active'; [v].contains(...)` — element is an ESymbol, not EString. The
+        // phase can't fold it at compile time, decline.
+        assertNull(extract("String v = 'active'; return doc['status'].size() == 1 && [v].contains(doc['status'].value);"));
+    }
+
+    public void testDeclineListContainsOnDifferentField() {
+        assertNull(extract("doc['status'].size() == 1 && ['active'].contains(doc['tier'].value)"));
+    }
+
+    public void testDeclineUnguardedListContains() {
+        assertNull(extract("['active', 'pending'].contains(doc['status'].value)"));
+    }
+
+    public void testDeclineListContainsWithParamArg() {
+        // `['active'].contains(params.x)` — argument isn't a field reference. This phase scope
+        // is list-of-literals-contains-field, not list-of-literals-contains-param. Decline.
+        assertNull(extract("doc['status'].size() == 1 && ['active'].contains(params.x)"));
+    }
+
+    public void testDeclineOtherMethodOnListLiteral() {
+        // Not the `contains` method — e.g. `.size()` on a list literal.
+        assertNull(extract("doc['status'].size() == 1 && ['active'].size() == 1"));
+    }
 }

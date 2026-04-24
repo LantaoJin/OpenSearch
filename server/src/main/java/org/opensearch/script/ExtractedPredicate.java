@@ -14,7 +14,9 @@ import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.query.QueryShardContext;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -197,16 +199,18 @@ public abstract class ExtractedPredicate {
      * stringification — which is strictly more permissive than the script).
      */
     private static Object resolveTermValue(Object value, Map<String, Object> params) {
-        if (value instanceof ParamRef == false) {
+        if (value instanceof ParamRef) {
+            value = params.get(((ParamRef) value).name());
+        }
+        // Defense-in-depth: the carrier's constructor is public with a raw `Object` value, so a
+        // third-party factory or a future phase change could hand us a non-String here. `BytesRefs
+        // .toBytesRef` would stringify any Object (Integer → "1", Boolean → "true", even another
+        // ParamRef via our custom toString → "params.x"), which `termQuery` would then look up
+        // bit-exactly — strictly more permissive than Painless' `.equals()` on the raw object.
+        // Require String to keep the rewrite equivalent to the script.
+        if (value instanceof String) {
             return value;
         }
-        Object resolved = params.get(((ParamRef) value).name());
-        if (resolved instanceof String) {
-            return resolved;
-        }
-        // null, Number, Boolean, List, nested maps — all decline. Painless' `.equals()` would
-        // return false for these (never match), and we preserve that by not matching anything
-        // either via the script path.
         return UNRESOLVABLE;
     }
 
@@ -354,6 +358,94 @@ public abstract class ExtractedPredicate {
         @Override
         public String toString() {
             return "Term{field='" + field + "', value=" + value + '}';
+        }
+    }
+
+    /**
+     * A set-membership predicate on one field, produced from shapes like
+     * {@code doc['status'].size() == 1 && ['active','pending'].contains(doc['status'].value)}.
+     * Values are typed as {@link Object} to match the {@link Term} carrier's shape; for this PR
+     * the phase only emits homogeneous lists of {@link String} literals, which {@link
+     * MappedFieldType#termsQuery} converts to {@code BytesRef}s via the same
+     * {@code BytesRefs.toBytesRef} path {@link Term#toQuery} relies on.
+     *
+     * <p>Applies the same two-part field-type gate as {@link Term}: only plain
+     * {@link KeywordFieldMapper.KeywordFieldType} without a configured normalizer is accepted,
+     * because normalized/analyzed fields would apply analysis to each list element and match a
+     * different document set than Painless' raw-bytes {@code .equals()}.
+     */
+    public static final class Terms extends ExtractedPredicate {
+        private final String field;
+        private final List<Object> values;
+
+        public Terms(String field, List<Object> values) {
+            this.field = Objects.requireNonNull(field, "field");
+            this.values = Collections.unmodifiableList(Objects.requireNonNull(values, "values"));
+        }
+
+        public String field() {
+            return field;
+        }
+
+        public List<Object> values() {
+            return values;
+        }
+
+        @Override
+        public Query toQuery(QueryShardContext context) {
+            return toQuery(context, Collections.emptyMap());
+        }
+
+        @Override
+        public Query toQuery(QueryShardContext context, Map<String, Object> params) {
+            MappedFieldType fieldType = context.fieldMapper(field);
+            if (fieldType == null) {
+                return null;
+            }
+            if ((fieldType instanceof KeywordFieldMapper.KeywordFieldType) == false) {
+                return null;
+            }
+            if (fieldType.getTextSearchInfo().getSearchAnalyzer() != Lucene.KEYWORD_ANALYZER) {
+                return null;
+            }
+            // Per-element validation applies the same String-only rule as Term. The public
+            // constructor takes raw {@code Object} elements, so a future phase change or a
+            // third-party factory could hand us a list with a numeric, Boolean, or ParamRef
+            // element whose `toString()` would silently match a document whose stored keyword
+            // equals that stringification. Resolve each element through the Term path and
+            // decline the whole rewrite if any element fails — partial lookup would be wrong
+            // because `List.contains` requires exact element matches, not some-of-matches.
+            List<Object> resolved = new ArrayList<>(values.size());
+            for (Object element : values) {
+                Object r = resolveTermValue(element, params);
+                if (r == UNRESOLVABLE) {
+                    return null;
+                }
+                resolved.add(r);
+            }
+            try {
+                return fieldType.termsQuery(resolved, context);
+            } catch (IllegalArgumentException | UnsupportedOperationException e) {
+                return null;
+            }
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            Terms t = (Terms) o;
+            return field.equals(t.field) && values.equals(t.values);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(field, values);
+        }
+
+        @Override
+        public String toString() {
+            return "Terms{field='" + field + "', values=" + values + '}';
         }
     }
 }

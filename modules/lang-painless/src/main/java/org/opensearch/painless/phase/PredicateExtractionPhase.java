@@ -16,6 +16,7 @@ import org.opensearch.painless.node.EBrace;
 import org.opensearch.painless.node.ECall;
 import org.opensearch.painless.node.EComp;
 import org.opensearch.painless.node.EDot;
+import org.opensearch.painless.node.EListInit;
 import org.opensearch.painless.node.ENumeric;
 import org.opensearch.painless.node.EString;
 import org.opensearch.painless.node.ESymbol;
@@ -146,6 +147,16 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
             ExtractedPredicate.Term term = tryExtractTerm((EComp) conjuncts.get(1), guardedField);
             if (term != null) {
                 return term;
+            }
+        }
+
+        // Single-membership shape: `guard && ['a','b',...].contains(doc['f'].value)`. Emit a
+        // Terms carrier. Declines for anything outside a list of homogeneous String literals or
+        // a non-field argument.
+        if (guardIndex == 0 && conjuncts.size() == 2 && conjuncts.get(1) instanceof ECall) {
+            ExtractedPredicate.Terms terms = tryExtractTerms((ECall) conjuncts.get(1), guardedField);
+            if (terms != null) {
+                return terms;
             }
         }
 
@@ -295,6 +306,44 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
             return ((EString) expr).getString();
         }
         return extractParamRef(expr);
+    }
+
+    /**
+     * Match a guarded set-membership call: {@code ['literal', 'literal', ...].contains(
+     * doc['f'].value)}. Returns an {@link ExtractedPredicate.Terms} when the list is a
+     * homogeneous sequence of {@link EString} literals (possibly empty) and the argument is a
+     * field reference on the guarded field. Declines anything else — variables inside the list,
+     * mixed-type elements, non-contains methods, missing list prefix, or a different field in
+     * the argument all fall through and let the script run.
+     *
+     * <p>Empty lists emit {@code Terms(field, [])}, which the carrier hands to
+     * {@code MappedFieldType.termsQuery(emptyList)} — that produces a boolean query with zero
+     * SHOULD clauses, i.e. match-nothing. Semantically identical to Painless'
+     * {@code [].contains(x)} which is always {@code false}.
+     */
+    private static ExtractedPredicate.Terms tryExtractTerms(ECall call, String guardedField) {
+        if ("contains".equals(call.getMethodName()) == false) return null;
+        if (call.getArgumentNodes().size() != 1) return null;
+        if ((call.getPrefixNode() instanceof EListInit) == false) return null;
+        EListInit listInit = (EListInit) call.getPrefixNode();
+        String argField = extractDocField(call.getArgumentNodes().get(0));
+        if (argField == null || argField.equals(guardedField) == false) {
+            return null;
+        }
+        List<Object> values = new ArrayList<>(listInit.getValueNodes().size());
+        for (AExpression element : listInit.getValueNodes()) {
+            if ((element instanceof EString) == false) {
+                // Non-literal (ESymbol, EDot, ParamRef) or non-String (ENumeric, EBoolean) would
+                // change semantics: Painless walks the list with `.equals()` against the raw
+                // element object, whereas `termsQuery` does a bit-exact lookup of the indexed
+                // keyword. A numeric element like `1` would be stringified ("1") before lookup
+                // and match a doc whose keyword is literally "1" — strictly more permissive
+                // than the script. Decline.
+                return null;
+            }
+            values.add(((EString) element).getString());
+        }
+        return new ExtractedPredicate.Terms(argField, values);
     }
 
     /**
