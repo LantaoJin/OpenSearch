@@ -8,10 +8,14 @@
 
 package org.opensearch.script;
 
+import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.opensearch.common.lucene.Lucene;
 import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
+import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.index.query.QueryShardContext;
 
 import java.util.ArrayList;
@@ -116,6 +120,17 @@ public abstract class ExtractedPredicate {
         public Query toQuery(QueryShardContext context, Map<String, Object> params) {
             MappedFieldType fieldType = context.fieldMapper(field);
             if (fieldType == null) {
+                return null;
+            }
+            // Range is only emitted for numeric comparisons, and the underlying Painless
+            // semantics rely on `DefMath` throwing `ClassCastException` on type mismatches.
+            // Some non-numeric field types (notably `KeywordFieldType`) implement
+            // `rangeQuery` by stringifying the bounds via `BytesRefs.toBytesRef` and building a
+            // lexicographic `TermRangeQuery` — so `value > 10` on a keyword field would silently
+            // match `"11"`, `"2"`, `"active"`, etc., whereas Painless would have thrown. Gate
+            // the rewrite to numeric field types so the rewrite and the script have the same
+            // outcome on every doc.
+            if ((fieldType instanceof NumberFieldMapper.NumberFieldType) == false) {
                 return null;
             }
             Object resolvedLower = resolveBound(lower, params);
@@ -446,6 +461,92 @@ public abstract class ExtractedPredicate {
         @Override
         public String toString() {
             return "Terms{field='" + field + "', values=" + values + '}';
+        }
+    }
+
+    /**
+     * A disjunction of other extracted predicates, produced from shapes like
+     * {@code doc['f'].size() == 1 && (doc['f'].value < 10 || doc['f'].value > 100)}. Rewrites to
+     * a {@link BooleanQuery} of SHOULD clauses with {@code minimumShouldMatch=1} — Lucene's
+     * native union. Each clause validates itself at {@link #toQuery} time; the {@code Or}
+     * carrier contributes no additional field-type gate.
+     *
+     * <p>Soundness derives from two properties the Painless phase enforces at extraction time:
+     * <ul>
+     *   <li>All clauses reference the same guarded field, so the shared {@code size() == 1}
+     *       guard dominates every clause at runtime.</li>
+     *   <li>Each clause is an independently rewrite-safe shape ({@link Range} or {@link Term}
+     *       on that field).</li>
+     * </ul>
+     * Under these properties Painless' short-circuit {@code ||} and Lucene's unconditional
+     * SHOULD produce the same doc-matching set — only the per-doc evaluation order differs,
+     * and we're skipping the script entirely.
+     */
+    public static final class Or extends ExtractedPredicate {
+        private final List<ExtractedPredicate> clauses;
+
+        public Or(List<ExtractedPredicate> clauses) {
+            Objects.requireNonNull(clauses, "clauses");
+            if (clauses.size() < 2) {
+                // The phase only constructs `Or` when it flattens an `||` AST node, which has
+                // exactly two operands. Guarding here protects against future callers.
+                throw new IllegalArgumentException("Or requires at least two clauses, got " + clauses.size());
+            }
+            List<ExtractedPredicate> copy = new ArrayList<>(clauses.size());
+            for (ExtractedPredicate clause : clauses) {
+                copy.add(Objects.requireNonNull(clause, "clause"));
+            }
+            this.clauses = Collections.unmodifiableList(copy);
+        }
+
+        public List<ExtractedPredicate> clauses() {
+            return clauses;
+        }
+
+        @Override
+        public Query toQuery(QueryShardContext context) {
+            return toQuery(context, Collections.emptyMap());
+        }
+
+        @Override
+        public Query toQuery(QueryShardContext context, Map<String, Object> params) {
+            BooleanQuery.Builder builder = new BooleanQuery.Builder();
+            try {
+                for (ExtractedPredicate clause : clauses) {
+                    Query clauseQuery = clause.toQuery(context, params);
+                    if (clauseQuery == null) {
+                        // Any clause that can't rewrite invalidates the whole union — a partial Or
+                        // would match a strict subset of what the script matches, so we decline
+                        // and let the script run.
+                        return null;
+                    }
+                    builder.add(clauseQuery, BooleanClause.Occur.SHOULD);
+                }
+                builder.setMinimumNumberShouldMatch(1);
+                return builder.build();
+            } catch (IndexSearcher.TooManyClauses e) {
+                // Disjunctions longer than BooleanQuery.getMaxClauseCount() (1024 by default)
+                // can't round-trip through the builder. Rather than failing the whole query
+                // request, decline and let the script run on the per-doc fallback path.
+                return null;
+            }
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            return clauses.equals(((Or) o).clauses);
+        }
+
+        @Override
+        public int hashCode() {
+            return clauses.hashCode();
+        }
+
+        @Override
+        public String toString() {
+            return "Or" + clauses;
         }
     }
 }

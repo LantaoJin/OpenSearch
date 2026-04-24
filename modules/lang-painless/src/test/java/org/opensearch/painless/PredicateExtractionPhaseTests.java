@@ -479,4 +479,76 @@ public class PredicateExtractionPhaseTests extends ScriptTestCase {
         // Not the `contains` method — e.g. `.size()` on a list literal.
         assertNull(extract("doc['status'].size() == 1 && ['active'].size() == 1"));
     }
+
+    // --- Or of same-field comparisons → Or carrier --------------------------
+
+    public void testGuardedOrOfTwoNumericRanges() {
+        ExtractedPredicate.Or or = (ExtractedPredicate.Or) extract(
+            "doc['price'].size() == 1 && (doc['price'].value < 10 || doc['price'].value > 100)"
+        );
+        assertNotNull(or);
+        assertEquals(2, or.clauses().size());
+        ExtractedPredicate.Range first = (ExtractedPredicate.Range) or.clauses().get(0);
+        assertEquals("price", first.field());
+        assertNull(first.lower());
+        assertEquals(Long.valueOf(10L), first.upper());
+        assertFalse(first.includeUpper());
+        ExtractedPredicate.Range second = (ExtractedPredicate.Range) or.clauses().get(1);
+        assertEquals(Long.valueOf(100L), second.lower());
+        assertNull(second.upper());
+        assertFalse(second.includeLower());
+    }
+
+    public void testGuardedOrOfThreeArms() {
+        // Painless parses `a || b || c` left-associatively as `(a || b) || c`. flattenOrChain
+        // walks the OR subtree into a flat list of three arms.
+        ExtractedPredicate.Or or = (ExtractedPredicate.Or) extract(
+            "doc['price'].size() == 1 && "
+                + "(doc['price'].value < 0 || doc['price'].value == 42 || doc['price'].value > 1000)"
+        );
+        assertNotNull(or);
+        assertEquals(3, or.clauses().size());
+    }
+
+    public void testGuardedOrMixedRangeAndTerm() {
+        ExtractedPredicate.Or or = (ExtractedPredicate.Or) extract(
+            "doc['status'].size() == 1 && "
+                + "(doc['status'].value == 'active' || doc['status'].value == 'pending')"
+        );
+        assertNotNull(or);
+        assertEquals(2, or.clauses().size());
+        assertTrue(or.clauses().get(0) instanceof ExtractedPredicate.Term);
+        assertTrue(or.clauses().get(1) instanceof ExtractedPredicate.Term);
+    }
+
+    public void testDeclineOrOnDifferentFields() {
+        // `a || b` where arms reference different fields — neither arm can share the guard's
+        // single-valuedness proof for the other's field.
+        assertNull(extract(
+            "doc['status'].size() == 1 && "
+                + "(doc['status'].value == 'x' || doc['tier'].value == 'y')"
+        ));
+    }
+
+    public void testDeclineOrWhenAnArmIsUnrewritable() {
+        // Arithmetic in one arm means that arm can't be extracted individually — the whole Or
+        // must decline.
+        assertNull(extract(
+            "doc['price'].size() == 1 && "
+                + "(doc['price'].value < 10 || doc['price'].value * 2 > 100)"
+        ));
+    }
+
+    public void testDeclineOrWithNestedAndArm() {
+        // `a || (b && c)` inside a guarded chain — the `&&` arm carries its own conjunct shape
+        // that arm extraction isn't set up to analyse under just the outer guard.
+        assertNull(extract(
+            "doc['price'].size() == 1 && "
+                + "(doc['price'].value < 10 || (doc['price'].value > 100 && doc['price'].value < 200))"
+        ));
+    }
+
+    public void testDeclineUnguardedOr() {
+        assertNull(extract("doc['price'].value < 10 || doc['price'].value > 100"));
+    }
 }

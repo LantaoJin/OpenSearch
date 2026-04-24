@@ -181,6 +181,70 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         );
     }
 
+    public void testGuardedOrRewritesToBooleanShould() throws IOException {
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(
+                "doc['price'].size() == 1 && (doc['price'].value < 10 || doc['price'].value > 100)"
+            )
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("guarded Or must rewrite, got " + query, query instanceof ConstantScoreQuery);
+        Query inner = ((ConstantScoreQuery) query).getQuery();
+        assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
+        assertTrue("expected a BooleanQuery inside, got " + inner, inner instanceof org.apache.lucene.search.BooleanQuery);
+        org.apache.lucene.search.BooleanQuery bq = (org.apache.lucene.search.BooleanQuery) inner;
+        assertEquals(1, bq.getMinimumNumberShouldMatch());
+        assertEquals(2, bq.clauses().size());
+    }
+
+    public void testUnguardedOrStaysOnScriptQuery() throws IOException {
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc['price'].value < 10 || doc['price'].value > 100")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("unguarded Or must stay on ScriptQuery, got " + query, isScriptQuery(query));
+    }
+
+    public void testGuardedNumericRangeOnKeywordFieldStaysOnScriptQuery() throws IOException {
+        // Pre-existing hole closed: KeywordFieldType.rangeQuery stringifies numeric bounds into
+        // a lexicographic range, which doesn't match Painless' DefMath.gt/lt throw-on-type-
+        // mismatch semantics. The Range.toQuery gate must decline the rewrite.
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc['status'].size() == 1 && doc['status'].value > 10")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("numeric range on keyword field must stay on ScriptQuery, got " + query, isScriptQuery(query));
+    }
+
+    public void testGuardedMixedTermRangeOrOnKeywordStaysOnScriptQuery() throws IOException {
+        // Mixed Term + Range arm on a keyword field: the Range arm's gate declines (keyword
+        // isn't a NumberFieldType), so the whole Or declines. Before the gate, the range arm
+        // would have stringified `10` lexicographically and diverged from Painless.
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(
+                "doc['status'].size() == 1 && (doc['status'].value == 'active' || doc['status'].value < 10)"
+            )
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("mixed Term/Range Or on keyword field must stay on ScriptQuery, got " + query, isScriptQuery(query));
+    }
+
     public void testKeywordWithNormalizerStaysOnScriptQuery() throws IOException {
         // Regression guard for semantic divergence on normalized keyword mappings. A `lowercase`
         // normalizer lowercases the search literal before lookup, so `termQuery('Active')`

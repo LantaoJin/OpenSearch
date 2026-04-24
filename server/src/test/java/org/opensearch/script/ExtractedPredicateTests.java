@@ -13,6 +13,7 @@ import org.apache.lucene.search.Query;
 import org.opensearch.index.analysis.NamedAnalyzer;
 import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
+import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.index.mapper.TextSearchInfo;
 import org.opensearch.index.query.QueryShardContext;
 import org.opensearch.test.OpenSearchTestCase;
@@ -32,11 +33,13 @@ public class ExtractedPredicateTests extends OpenSearchTestCase {
 
     public void testRangeRoutesToFieldType() {
         QueryShardContext context = mock(QueryShardContext.class);
-        MappedFieldType fieldType = mock(MappedFieldType.class);
+        NumberFieldMapper.NumberFieldType fieldType = spy(
+            new NumberFieldMapper.NumberFieldType("price", NumberFieldMapper.NumberType.LONG)
+        );
         Query expected = new MatchAllDocsQuery();
 
         when(context.fieldMapper("price")).thenReturn(fieldType);
-        when(fieldType.rangeQuery(any(), any(), eq(true), eq(false), any(), any(), any(), eq(context))).thenReturn(expected);
+        doReturn(expected).when(fieldType).rangeQuery(any(), any(), eq(true), eq(false), eq(context));
 
         ExtractedPredicate predicate = new ExtractedPredicate.Range("price", 10L, 100L, true, false);
         Query actual = predicate.toQuery(context);
@@ -55,11 +58,12 @@ public class ExtractedPredicateTests extends OpenSearchTestCase {
 
     public void testRangeSwallowsUnsupportedField() {
         QueryShardContext context = mock(QueryShardContext.class);
-        MappedFieldType fieldType = mock(MappedFieldType.class);
-        when(context.fieldMapper("price")).thenReturn(fieldType);
-        when(fieldType.rangeQuery(any(), any(), anyBoolean(), anyBoolean(), any(), any(), any(), eq(context))).thenThrow(
-            new IllegalArgumentException("field [price] does not support range queries")
+        NumberFieldMapper.NumberFieldType fieldType = spy(
+            new NumberFieldMapper.NumberFieldType("price", NumberFieldMapper.NumberType.LONG)
         );
+        when(context.fieldMapper("price")).thenReturn(fieldType);
+        doThrow(new IllegalArgumentException("field [price] does not support range queries")).when(fieldType)
+            .rangeQuery(any(), any(), anyBoolean(), anyBoolean(), eq(context));
 
         ExtractedPredicate predicate = new ExtractedPredicate.Range("price", 0L, 10L, true, true);
         assertNull(predicate.toQuery(context));
@@ -113,17 +117,18 @@ public class ExtractedPredicateTests extends OpenSearchTestCase {
 
     public void testRangeResolvesParamRefAndPassesToFieldType() {
         QueryShardContext context = mock(QueryShardContext.class);
-        MappedFieldType fieldType = mock(MappedFieldType.class);
+        NumberFieldMapper.NumberFieldType fieldType = spy(
+            new NumberFieldMapper.NumberFieldType("price", NumberFieldMapper.NumberType.LONG)
+        );
         Query expected = new MatchAllDocsQuery();
         when(context.fieldMapper("price")).thenReturn(fieldType);
-        when(fieldType.rangeQuery(any(), any(), anyBoolean(), anyBoolean(), any(), any(), any(), eq(context))).thenReturn(expected);
+        doReturn(expected).when(fieldType).rangeQuery(any(), any(), anyBoolean(), anyBoolean(), eq(context));
 
         ExtractedPredicate predicate = new ExtractedPredicate.Range("price", new ExtractedPredicate.ParamRef("threshold"), null, false, true);
         Query actual = predicate.toQuery(context, Collections.singletonMap("threshold", 10L));
 
         assertSame(expected, actual);
-        // The resolved Long flows straight through to rangeQuery; no coercion happens in the carrier.
-        verify(fieldType).rangeQuery(10L, null, false, true, null, null, null, context);
+        verify(fieldType).rangeQuery(10L, null, false, true, context);
     }
 
     public void testRangeDeclinesStringParam() {
@@ -131,44 +136,48 @@ public class ExtractedPredicateTests extends OpenSearchTestCase {
         // ClassCastException when the RHS is a String. The rewrite must not be more permissive
         // than the script: decline so the script runs and the user sees the same exception.
         QueryShardContext context = mock(QueryShardContext.class);
-        MappedFieldType fieldType = mock(MappedFieldType.class);
+        NumberFieldMapper.NumberFieldType fieldType = spy(
+            new NumberFieldMapper.NumberFieldType("price", NumberFieldMapper.NumberType.LONG)
+        );
         when(context.fieldMapper("price")).thenReturn(fieldType);
 
         ExtractedPredicate predicate = new ExtractedPredicate.Range("price", new ExtractedPredicate.ParamRef("threshold"), null, false, true);
         assertNull(predicate.toQuery(context, Collections.singletonMap("threshold", "10")));
-        verify(fieldType, org.mockito.Mockito.never()).rangeQuery(any(), any(), anyBoolean(), anyBoolean(), any(), any(), any(), any());
+        verify(fieldType, org.mockito.Mockito.never()).rangeQuery(any(), any(), anyBoolean(), anyBoolean(), any());
     }
 
     public void testRangeDeclinesWhenParamIsMissing() {
-        // Missing param: Painless would have thrown. Decline so the script runs and the user
-        // sees the exception rather than a silently wrong match-all range.
         QueryShardContext context = mock(QueryShardContext.class);
-        MappedFieldType fieldType = mock(MappedFieldType.class);
+        NumberFieldMapper.NumberFieldType fieldType = spy(
+            new NumberFieldMapper.NumberFieldType("price", NumberFieldMapper.NumberType.LONG)
+        );
         when(context.fieldMapper("price")).thenReturn(fieldType);
 
         ExtractedPredicate predicate = new ExtractedPredicate.Range("price", new ExtractedPredicate.ParamRef("threshold"), null, false, true);
         assertNull(predicate.toQuery(context, Collections.emptyMap()));
-        verify(fieldType, org.mockito.Mockito.never()).rangeQuery(any(), any(), anyBoolean(), anyBoolean(), any(), any(), any(), any());
+        verify(fieldType, org.mockito.Mockito.never()).rangeQuery(any(), any(), anyBoolean(), anyBoolean(), any());
     }
 
     public void testRangeDeclinesWhenParamIsNotNumberOrString() {
         QueryShardContext context = mock(QueryShardContext.class);
-        MappedFieldType fieldType = mock(MappedFieldType.class);
+        NumberFieldMapper.NumberFieldType fieldType = spy(
+            new NumberFieldMapper.NumberFieldType("price", NumberFieldMapper.NumberType.LONG)
+        );
         when(context.fieldMapper("price")).thenReturn(fieldType);
 
         ExtractedPredicate predicate = new ExtractedPredicate.Range("price", new ExtractedPredicate.ParamRef("threshold"), null, false, true);
         assertNull(predicate.toQuery(context, Collections.singletonMap("threshold", java.util.Arrays.asList(1, 2))));
         assertNull(predicate.toQuery(context, Collections.singletonMap("threshold", Boolean.TRUE)));
-        verify(fieldType, org.mockito.Mockito.never()).rangeQuery(any(), any(), anyBoolean(), anyBoolean(), any(), any(), any(), any());
+        verify(fieldType, org.mockito.Mockito.never()).rangeQuery(any(), any(), anyBoolean(), anyBoolean(), any());
     }
 
     public void testRangeResolvesBothBoundsFromParams() {
         QueryShardContext context = mock(QueryShardContext.class);
-        MappedFieldType fieldType = mock(MappedFieldType.class);
-        when(context.fieldMapper("price")).thenReturn(fieldType);
-        when(fieldType.rangeQuery(any(), any(), anyBoolean(), anyBoolean(), any(), any(), any(), eq(context))).thenReturn(
-            new MatchAllDocsQuery()
+        NumberFieldMapper.NumberFieldType fieldType = spy(
+            new NumberFieldMapper.NumberFieldType("price", NumberFieldMapper.NumberType.LONG)
         );
+        when(context.fieldMapper("price")).thenReturn(fieldType);
+        doReturn(new MatchAllDocsQuery()).when(fieldType).rangeQuery(any(), any(), anyBoolean(), anyBoolean(), eq(context));
 
         ExtractedPredicate predicate = new ExtractedPredicate.Range(
             "price",
@@ -181,22 +190,34 @@ public class ExtractedPredicateTests extends OpenSearchTestCase {
         params.put("low", 5L);
         params.put("high", 50L);
         assertNotNull(predicate.toQuery(context, params));
-        verify(fieldType).rangeQuery(5L, 50L, false, false, null, null, null, context);
+        verify(fieldType).rangeQuery(5L, 50L, false, false, context);
     }
 
     public void testRangeMixedLiteralAndParamBounds() {
-        // One side literal, one side param — the literal passes through unresolved and the param
-        // resolves against the map.
         QueryShardContext context = mock(QueryShardContext.class);
-        MappedFieldType fieldType = mock(MappedFieldType.class);
-        when(context.fieldMapper("price")).thenReturn(fieldType);
-        when(fieldType.rangeQuery(any(), any(), anyBoolean(), anyBoolean(), any(), any(), any(), eq(context))).thenReturn(
-            new MatchAllDocsQuery()
+        NumberFieldMapper.NumberFieldType fieldType = spy(
+            new NumberFieldMapper.NumberFieldType("price", NumberFieldMapper.NumberType.LONG)
         );
+        when(context.fieldMapper("price")).thenReturn(fieldType);
+        doReturn(new MatchAllDocsQuery()).when(fieldType).rangeQuery(any(), any(), anyBoolean(), anyBoolean(), eq(context));
 
         ExtractedPredicate predicate = new ExtractedPredicate.Range("price", 10L, new ExtractedPredicate.ParamRef("high"), false, false);
         assertNotNull(predicate.toQuery(context, Collections.singletonMap("high", 100L)));
-        verify(fieldType).rangeQuery(10L, 100L, false, false, null, null, null, context);
+        verify(fieldType).rangeQuery(10L, 100L, false, false, context);
+    }
+
+    public void testRangeDeclinesForNonNumericFieldType() {
+        // Pre-existing hole closed by the NumberFieldType gate: `KeywordFieldType.rangeQuery`
+        // stringifies numeric bounds into a lexicographic range (`new BytesRef("10")`), which
+        // matches a different doc set than Painless' DefMath.gt/lt would — the latter throws
+        // ClassCastException on String-vs-Long. Must decline.
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType keyword = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        when(context.fieldMapper("status")).thenReturn(keyword);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Range("status", 10L, null, false, true);
+        assertNull(predicate.toQuery(context));
+        verify(keyword, org.mockito.Mockito.never()).rangeQuery(any(), any(), anyBoolean(), anyBoolean(), any());
     }
 
     public void testParamRefEqualsAndHashCode() {
@@ -424,6 +445,99 @@ public class ExtractedPredicateTests extends OpenSearchTestCase {
         assertEquals(a.hashCode(), b.hashCode());
         assertNotEquals(a, c);
         assertNotEquals(a, d);
+    }
+
+    public void testOrUnionsClauses() {
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        Query firstClauseQuery = new MatchAllDocsQuery();
+        Query secondClauseQuery = new org.apache.lucene.search.MatchNoDocsQuery("second");
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+        doReturn(firstClauseQuery).when(fieldType).termQuery("a", context);
+        doReturn(secondClauseQuery).when(fieldType).termQuery("b", context);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Or(java.util.Arrays.asList(
+            new ExtractedPredicate.Term("status", "a"),
+            new ExtractedPredicate.Term("status", "b")
+        ));
+
+        Query query = predicate.toQuery(context);
+        assertTrue("expected BooleanQuery, got " + query, query instanceof org.apache.lucene.search.BooleanQuery);
+        org.apache.lucene.search.BooleanQuery bq = (org.apache.lucene.search.BooleanQuery) query;
+        assertEquals(1, bq.getMinimumNumberShouldMatch());
+        assertEquals(2, bq.clauses().size());
+        for (org.apache.lucene.search.BooleanClause clause : bq.clauses()) {
+            assertEquals("each clause must be SHOULD", org.apache.lucene.search.BooleanClause.Occur.SHOULD, clause.occur());
+        }
+        assertSame(firstClauseQuery, bq.clauses().get(0).query());
+        assertSame(secondClauseQuery, bq.clauses().get(1).query());
+    }
+
+    public void testOrDeclinesWhenAnyClauseReturnsNull() {
+        // A field-type gate mismatch on any single clause must invalidate the whole union —
+        // partial Or would match a strict subset of what the script matches.
+        QueryShardContext context = mock(QueryShardContext.class);
+        // No field mapping for "other" → that clause's toQuery returns null.
+        when(context.fieldMapper("other")).thenReturn(null);
+        KeywordFieldMapper.KeywordFieldType keyword = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        when(context.fieldMapper("status")).thenReturn(keyword);
+        doReturn(new MatchAllDocsQuery()).when(keyword).termQuery(any(), any());
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Or(java.util.Arrays.asList(
+            new ExtractedPredicate.Term("status", "a"),
+            new ExtractedPredicate.Term("other", "b")
+        ));
+
+        assertNull(predicate.toQuery(context));
+    }
+
+    public void testOrRequiresAtLeastTwoClauses() {
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> new ExtractedPredicate.Or(Collections.singletonList(new ExtractedPredicate.Term("status", "a")))
+        );
+    }
+
+    public void testOrDeclinesWhenClauseCountExceedsBooleanLimit() {
+        // BooleanQuery.Builder.add throws IndexSearcher.TooManyClauses past the configured max
+        // (1024 by default). Before the fix, a giant Or chain would fail the whole request
+        // rather than fall back to the script path. Stub each clause to return a trivial query
+        // so we can focus on the builder's limit.
+        QueryShardContext context = mock(QueryShardContext.class);
+        int max = org.apache.lucene.search.IndexSearcher.getMaxClauseCount();
+        java.util.List<ExtractedPredicate> clauses = new java.util.ArrayList<>(max + 1);
+        Query dummy = new MatchAllDocsQuery();
+        for (int i = 0; i < max + 1; i++) {
+            clauses.add(new ExtractedPredicate() {
+                @Override
+                public Query toQuery(QueryShardContext c) {
+                    return dummy;
+                }
+            });
+        }
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Or(clauses);
+        assertNull("Or must fall back to the script rather than throw TooManyClauses", predicate.toQuery(context));
+    }
+
+    public void testOrEqualsAndHashCode() {
+        ExtractedPredicate.Or a = new ExtractedPredicate.Or(java.util.Arrays.asList(
+            new ExtractedPredicate.Term("status", "x"),
+            new ExtractedPredicate.Term("status", "y")
+        ));
+        ExtractedPredicate.Or b = new ExtractedPredicate.Or(java.util.Arrays.asList(
+            new ExtractedPredicate.Term("status", "x"),
+            new ExtractedPredicate.Term("status", "y")
+        ));
+        ExtractedPredicate.Or c = new ExtractedPredicate.Or(java.util.Arrays.asList(
+            new ExtractedPredicate.Term("status", "y"),
+            new ExtractedPredicate.Term("status", "x")
+        ));
+        assertEquals(a, b);
+        assertEquals(a.hashCode(), b.hashCode());
+        // Or is order-sensitive (SHOULD clauses execute in order even if the union set is the
+        // same; treating reorderings as equal would hide genuine AST differences).
+        assertNotEquals(a, c);
     }
 
     public void testEqualsAndHashCode() {

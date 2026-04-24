@@ -141,22 +141,13 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
             return null;
         }
 
-        // Single-comparison string-equality: shape is `guard && doc['f'].value == 'literal'`.
-        // Emit a Term carrier. Numeric comparisons fall through to the range-folding loop below.
-        if (guardIndex == 0 && conjuncts.size() == 2 && conjuncts.get(1) instanceof EComp) {
-            ExtractedPredicate.Term term = tryExtractTerm((EComp) conjuncts.get(1), guardedField);
-            if (term != null) {
-                return term;
-            }
-        }
-
-        // Single-membership shape: `guard && ['a','b',...].contains(doc['f'].value)`. Emit a
-        // Terms carrier. Declines for anything outside a list of homogeneous String literals or
-        // a non-field argument.
-        if (guardIndex == 0 && conjuncts.size() == 2 && conjuncts.get(1) instanceof ECall) {
-            ExtractedPredicate.Terms terms = tryExtractTerms((ECall) conjuncts.get(1), guardedField);
-            if (terms != null) {
-                return terms;
+        // `guard && <single-conjunct>` covers Term, Terms, single-comparison Range, and Or of
+        // same-field comparisons. Multi-comparison numeric chains (bounded ranges combined via
+        // `&&`) flow through the bound-folding loop below.
+        if (guardIndex == 0 && conjuncts.size() == 2) {
+            ExtractedPredicate predicate = tryExtractSingleConjunct(conjuncts.get(1), guardedField);
+            if (predicate != null) {
+                return predicate;
             }
         }
 
@@ -263,6 +254,131 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
     }
 
     /**
+     * Try to extract a single conjunct — everything to the right of the guard in a two-conjunct
+     * chain, and also each arm inside an {@code ||}. Returns a predicate on success, {@code null}
+     * if the conjunct doesn't match any recognised shape. Recognised shapes are:
+     * <ul>
+     *   <li>{@link EBooleanComp} with {@code OR} → {@link ExtractedPredicate.Or} of sub-shapes.</li>
+     *   <li>{@link EComp} with {@code ==} on a string literal or {@code params.x} →
+     *       {@link ExtractedPredicate.Term}.</li>
+     *   <li>{@link EComp} on numeric bounds → single-bound {@link ExtractedPredicate.Range}.</li>
+     *   <li>{@link ECall} {@code list.contains(field)} →
+     *       {@link ExtractedPredicate.Terms}.</li>
+     * </ul>
+     * Each sub-helper enforces the guarded-field and field-type requirements; this method is a
+     * pure dispatcher.
+     */
+    private static ExtractedPredicate tryExtractSingleConjunct(AExpression expr, String guardedField) {
+        if (expr instanceof EBooleanComp) {
+            return tryExtractOr((EBooleanComp) expr, guardedField);
+        }
+        if (expr instanceof EComp) {
+            EComp comp = (EComp) expr;
+            ExtractedPredicate.Term term = tryExtractTerm(comp, guardedField);
+            if (term != null) {
+                return term;
+            }
+            return tryExtractSingleComparisonRange(comp, guardedField);
+        }
+        if (expr instanceof ECall) {
+            return tryExtractTerms((ECall) expr, guardedField);
+        }
+        return null;
+    }
+
+    /**
+     * Extract a single numeric comparison ({@code field OP literal-or-param}) as a one-bound
+     * {@link ExtractedPredicate.Range}. Mirrors the first iteration of the multi-conjunct
+     * bound-folding loop in {@link #extractPredicate}, but for the one-bound case that's
+     * reachable from {@link #tryExtractSingleConjunct}.
+     */
+    private static ExtractedPredicate.Range tryExtractSingleComparisonRange(EComp comp, String guardedField) {
+        ComparisonShape shape = ComparisonShape.of(comp);
+        if (shape == null) {
+            return null;
+        }
+        if (guardedField.equals(shape.field) == false) {
+            return null;
+        }
+        Bound bound = applyBound(shape);
+        if (bound == null) {
+            return null;
+        }
+        Object lower = bound.lower;
+        Object upper = bound.upper;
+        boolean includeLower = bound.includeLower;
+        boolean includeUpper = bound.includeUpper;
+        if (bound.equalTo != null) {
+            lower = bound.equalTo;
+            upper = bound.equalTo;
+            includeLower = true;
+            includeUpper = true;
+        }
+        if (lower == null && upper == null) {
+            return null;
+        }
+        return new ExtractedPredicate.Range(shape.field, lower, upper, includeLower, includeUpper);
+    }
+
+    /**
+     * Flatten an {@code ||} expression (Painless left-associative) into a list of arms, extract
+     * each arm via {@link #tryExtractSingleConjunct}, and wrap the results in an
+     * {@link ExtractedPredicate.Or}. Declines if any arm can't be extracted or references a
+     * different field from the shared guard — a partial rewrite would match a strict subset of
+     * what the script matches.
+     *
+     * <p>Soundness: the guarded `size() == 1` check runs before any {@code ||} arm, so every
+     * arm sees only single-valued docs on the guarded field. Painless' short-circuit `||` and
+     * Lucene's unconditional SHOULD-union produce the same match set because each arm is an
+     * independently rewrite-safe shape under the guard.
+     */
+    private static ExtractedPredicate.Or tryExtractOr(EBooleanComp boolExpr, String guardedField) {
+        if (boolExpr.getOperation() != Operation.OR) {
+            return null;
+        }
+        List<AExpression> arms = new ArrayList<>();
+        if (flattenOrChain(boolExpr, arms) == false) {
+            return null;
+        }
+        List<ExtractedPredicate> clauses = new ArrayList<>(arms.size());
+        for (AExpression arm : arms) {
+            ExtractedPredicate clause = tryExtractSingleConjunct(arm, guardedField);
+            if (clause == null) {
+                return null;
+            }
+            // Disallow nested Or inside Or — Painless parses `a || b || c` as
+            // `EBooleanComp(OR, EBooleanComp(OR, a, b), c)`, which `flattenOrChain` has already
+            // expanded to a flat list. A non-left-associative `a || (b || c)` would round-trip
+            // through the recursion already; still, a nested Or as a direct clause would
+            // indicate a grammar we don't yet handle.
+            if (clause instanceof ExtractedPredicate.Or) {
+                return null;
+            }
+            clauses.add(clause);
+        }
+        return new ExtractedPredicate.Or(clauses);
+    }
+
+    /**
+     * Flatten a left-associative {@code ||} chain into its leaf arms. Returns false if the
+     * expression contains any non-OR boolean node that isn't a leaf — for example,
+     * {@code a || b && c} should decline here because the inner {@code &&} operand would carry
+     * its own conjunct structure that arm extraction isn't set up to analyse.
+     */
+    private static boolean flattenOrChain(AExpression expr, List<AExpression> into) {
+        if (expr instanceof EBooleanComp) {
+            EBooleanComp bc = (EBooleanComp) expr;
+            if (bc.getOperation() != Operation.OR) {
+                // A nested `&&` under Or would need its own guard to be rewrite-safe. Decline.
+                return false;
+            }
+            return flattenOrChain(bc.getLeftNode(), into) && flattenOrChain(bc.getRightNode(), into);
+        }
+        into.add(expr);
+        return true;
+    }
+
+    /**
      * Match a guarded single string-equality. The non-field side may be either a string literal
      * ({@code doc['f'].value == 'active'}) or a {@code params.<name>} reference
      * ({@code doc['f'].value == params.status}); both emit an {@link ExtractedPredicate.Term}
@@ -353,10 +469,13 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
     private boolean collectAndChain(AExpression expr, List<AExpression> into) {
         if (expr instanceof EBooleanComp) {
             EBooleanComp bc = (EBooleanComp) expr;
-            if (bc.getOperation() != Operation.AND) {
-                return false;
+            if (bc.getOperation() == Operation.AND) {
+                return collectAndChain(bc.getLeftNode(), into) && collectAndChain(bc.getRightNode(), into);
             }
-            return collectAndChain(bc.getLeftNode(), into) && collectAndChain(bc.getRightNode(), into);
+            // OR nodes are treated as leaf conjuncts here — `tryExtractSingleConjunct` dispatches
+            // them into `tryExtractOr`. Falling through to `into.add(expr)` would previously have
+            // been prevented by the old decline-on-non-AND check; the current single-conjunct
+            // slot needs Or as a leaf so the walker sees it unchanged.
         }
         into.add(expr);
         return true;
