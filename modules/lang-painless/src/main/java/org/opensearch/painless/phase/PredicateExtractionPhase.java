@@ -252,42 +252,49 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
     }
 
     /**
-     * Match a guarded single string-equality: {@code doc['f'].value == 'literal'} or the literal-
-     * on-left form. Returns a {@link ExtractedPredicate.Term} only if the comparison's field
-     * matches {@code guardedField} — otherwise the guard doesn't cover the read and we decline.
-     * Only {@code ==} is accepted here; {@code !=} would need an OR-of-everything-else that
-     * Lucene doesn't express natively on a term.
+     * Match a guarded single string-equality. The non-field side may be either a string literal
+     * ({@code doc['f'].value == 'active'}) or a {@code params.<name>} reference
+     * ({@code doc['f'].value == params.status}); both emit an {@link ExtractedPredicate.Term}
+     * whose value is either the literal String or a {@link ExtractedPredicate.ParamRef}. Only
+     * {@code ==} is accepted here; {@code !=} would need an OR-of-everything-else that Lucene
+     * doesn't express natively on a term.
      */
     private static ExtractedPredicate.Term tryExtractTerm(EComp comp, String guardedField) {
         if (comp.getOperation() != Operation.EQ) {
             return null;
         }
         String leftField = extractDocField(comp.getLeftNode());
-        String rightLit = extractStringLiteral(comp.getRightNode());
+        Object rightValue = extractStringOrParamRef(comp.getRightNode());
         String field;
-        String literal;
-        if (leftField != null && rightLit != null) {
+        Object value;
+        if (leftField != null && rightValue != null) {
             field = leftField;
-            literal = rightLit;
+            value = rightValue;
         } else {
             String rightField = extractDocField(comp.getRightNode());
-            String leftLit = extractStringLiteral(comp.getLeftNode());
-            if (rightField == null || leftLit == null) {
+            Object leftValue = extractStringOrParamRef(comp.getLeftNode());
+            if (rightField == null || leftValue == null) {
                 return null;
             }
             field = rightField;
-            literal = leftLit;
+            value = leftValue;
         }
         if (guardedField.equals(field) == false) {
             return null;
         }
-        return new ExtractedPredicate.Term(field, literal);
+        return new ExtractedPredicate.Term(field, value);
     }
 
-    /** Match a bare string literal. Declines everything else, including {@code null}. */
-    private static String extractStringLiteral(AExpression expr) {
-        if ((expr instanceof EString) == false) return null;
-        return ((EString) expr).getString();
+    /**
+     * Match a string literal or a {@code params.<name>} reference on the non-field side of a
+     * term-equality comparison. Returns a {@link String} or an
+     * {@link ExtractedPredicate.ParamRef}; returns {@code null} when neither shape matches.
+     */
+    private static Object extractStringOrParamRef(AExpression expr) {
+        if (expr instanceof EString) {
+            return ((EString) expr).getString();
+        }
+        return extractParamRef(expr);
     }
 
     /**

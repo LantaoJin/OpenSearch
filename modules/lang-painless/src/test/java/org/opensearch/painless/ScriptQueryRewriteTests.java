@@ -199,6 +199,39 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
     }
 
+    public void testGuardedStringEqualityAgainstParamRewritesToTerm() throws IOException {
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("expected", "active");
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(ScriptType.INLINE, "painless", "doc['status'].size() == 1 && doc['status'].value == params.expected", params)
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("guarded ==-param term must rewrite, got " + query, query instanceof ConstantScoreQuery);
+        Query inner = ((ConstantScoreQuery) query).getQuery();
+        assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
+    }
+
+    public void testNumericValuedTermParamFallsBackToScript() throws IOException {
+        // Painless' `String.equals(Integer)` returns false, never throws. The rewrite would
+        // stringify the number and match a doc whose keyword literally equals that string —
+        // strictly more permissive. Must decline.
+        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("expected", 123);
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(ScriptType.INLINE, "painless", "doc['status'].size() == 1 && doc['status'].value == params.expected", params)
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("Number-valued term param must stay on ScriptQuery, got " + query, isScriptQuery(query));
+    }
+
     public void testStringValuedNumericParamFallsBackToScript() throws IOException {
         // Painless compiles `long > Object` via DefMath.gt, which throws on Long-vs-String. The
         // rewrite must match that semantics and decline a String-valued numeric param, not

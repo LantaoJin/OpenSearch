@@ -294,9 +294,21 @@ public class PredicateExtractionPhaseTests extends ScriptTestCase {
         assertNull(extract("doc['price'].size() == 1 && doc['price'].value > params.a && doc['price'].value > params.b"));
     }
 
-    public void testDeclineEqualityAgainstParam() {
-        // `.value == params.x` would need a Term carrier holding a ParamRef value — deferred.
-        assertNull(extract("doc['price'].size() == 1 && doc['price'].value == params.x"));
+    public void testGuardedStringEqualityAgainstParam() {
+        ExtractedPredicate.Term t = (ExtractedPredicate.Term) extract(
+            "doc['status'].size() == 1 && doc['status'].value == params.expected"
+        );
+        assertNotNull(t);
+        assertEquals("status", t.field());
+        assertEquals(new ExtractedPredicate.ParamRef("expected"), t.value());
+    }
+
+    public void testGuardedStringEqualityParamLiteralOnLeft() {
+        ExtractedPredicate.Term t = (ExtractedPredicate.Term) extract(
+            "doc['status'].size() == 1 && params.expected == doc['status'].value"
+        );
+        assertNotNull(t);
+        assertEquals(new ExtractedPredicate.ParamRef("expected"), t.value());
     }
 
     public void testDeclineUnguardedParamComparison() {

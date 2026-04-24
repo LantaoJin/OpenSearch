@@ -234,6 +234,58 @@ public class ExtractedPredicateTests extends OpenSearchTestCase {
         verify(fieldType, org.mockito.Mockito.never()).termQuery(any(), any());
     }
 
+    public void testTermResolvesStringParamAndPassesToFieldType() {
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        Query expected = new MatchAllDocsQuery();
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+        doReturn(expected).when(fieldType).termQuery("active", context);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Term("status", new ExtractedPredicate.ParamRef("expected"));
+        Query actual = predicate.toQuery(context, Collections.singletonMap("expected", "active"));
+
+        assertSame(expected, actual);
+        verify(fieldType).termQuery("active", context);
+    }
+
+    public void testTermDeclinesWhenParamIsMissing() {
+        // Painless' .equals on a null param returns false. We preserve that by declining; the
+        // script runs and matches nothing. Accepting would mean passing null to termQuery which
+        // most field types treat as NPE or match-nothing — silent behavior change.
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Term("status", new ExtractedPredicate.ParamRef("expected"));
+        assertNull(predicate.toQuery(context, Collections.emptyMap()));
+        verify(fieldType, org.mockito.Mockito.never()).termQuery(any(), any());
+    }
+
+    public void testTermDeclinesWhenParamIsNumber() {
+        // `doc['status'].value == params.expected` with `expected = 123` Painless-evaluates to
+        // `"active".equals(Integer(123))` = false. The rewrite would stringify via
+        // `BytesRefs.toBytesRef(123)` = "123" and match docs whose keyword literally is "123" —
+        // silently more permissive. Decline.
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Term("status", new ExtractedPredicate.ParamRef("expected"));
+        assertNull(predicate.toQuery(context, Collections.singletonMap("expected", 123)));
+        verify(fieldType, org.mockito.Mockito.never()).termQuery(any(), any());
+    }
+
+    public void testTermDeclinesWhenParamIsBooleanOrList() {
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Term("status", new ExtractedPredicate.ParamRef("expected"));
+        assertNull(predicate.toQuery(context, Collections.singletonMap("expected", Boolean.TRUE)));
+        assertNull(predicate.toQuery(context, Collections.singletonMap("expected", java.util.Arrays.asList("a", "b"))));
+        verify(fieldType, org.mockito.Mockito.never()).termQuery(any(), any());
+    }
+
     public void testTermEqualsAndHashCode() {
         ExtractedPredicate.Term a = new ExtractedPredicate.Term("status", "active");
         ExtractedPredicate.Term b = new ExtractedPredicate.Term("status", "active");

@@ -184,6 +184,33 @@ public abstract class ExtractedPredicate {
     private static final Object UNRESOLVABLE = new Object();
 
     /**
+     * Resolve a Term's value to an object suitable for {@link MappedFieldType#termQuery} on a
+     * keyword field. Literal strings pass through; {@link ParamRef}s look up their value in
+     * {@code params} and must resolve to a {@link String} to preserve Painless'
+     * {@code DefMath.eq} semantics.
+     *
+     * <p>The rule differs from {@link #resolveBound}: numeric range comparisons only accept
+     * {@link Number} (Painless throws on non-Number operands), while string equality only
+     * accepts {@link String} (Painless returns {@code false} on non-String operands, never
+     * throws, but the rewrite's {@code BytesRefs.toBytesRef} would invoke {@code toString()}
+     * on any {@code Object} and silently match documents whose stored keyword equals that
+     * stringification — which is strictly more permissive than the script).
+     */
+    private static Object resolveTermValue(Object value, Map<String, Object> params) {
+        if (value instanceof ParamRef == false) {
+            return value;
+        }
+        Object resolved = params.get(((ParamRef) value).name());
+        if (resolved instanceof String) {
+            return resolved;
+        }
+        // null, Number, Boolean, List, nested maps — all decline. Painless' `.equals()` would
+        // return false for these (never match), and we preserve that by not matching anything
+        // either via the script path.
+        return UNRESOLVABLE;
+    }
+
+    /**
      * Resolve a Range bound to an object suitable for {@link MappedFieldType#rangeQuery}. Literal
      * bounds pass through; {@link ParamRef}s look up their value in {@code params}. Returns the
      * {@link #UNRESOLVABLE} sentinel when a ParamRef can't be resolved safely — the caller must
@@ -272,6 +299,11 @@ public abstract class ExtractedPredicate {
 
         @Override
         public Query toQuery(QueryShardContext context) {
+            return toQuery(context, Collections.emptyMap());
+        }
+
+        @Override
+        public Query toQuery(QueryShardContext context, Map<String, Object> params) {
             MappedFieldType fieldType = context.fieldMapper(field);
             if (fieldType == null) {
                 return null;
@@ -293,8 +325,12 @@ public abstract class ExtractedPredicate {
             if (fieldType.getTextSearchInfo().getSearchAnalyzer() != Lucene.KEYWORD_ANALYZER) {
                 return null;
             }
+            Object resolved = resolveTermValue(value, params);
+            if (resolved == UNRESOLVABLE) {
+                return null;
+            }
             try {
-                return fieldType.termQuery(value, context);
+                return fieldType.termQuery(resolved, context);
             } catch (IllegalArgumentException | UnsupportedOperationException e) {
                 // Field type doesn't support term queries, or the value doesn't parse against
                 // this field type. Fall back to the script in either case.
