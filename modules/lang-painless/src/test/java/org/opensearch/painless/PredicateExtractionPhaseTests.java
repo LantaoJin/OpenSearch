@@ -551,4 +551,70 @@ public class PredicateExtractionPhaseTests extends ScriptTestCase {
     public void testDeclineUnguardedOr() {
         assertNull(extract("doc['price'].value < 10 || doc['price'].value > 100"));
     }
+
+    // --- multi-field `And` → And carrier ------------------------------------
+
+    public void testGuardedTwoFieldAnd() {
+        ExtractedPredicate.And and = (ExtractedPredicate.And) extract(
+            "doc['price'].size() == 1 && doc['price'].value > 10 && "
+                + "doc['status'].size() == 1 && doc['status'].value == 'active'"
+        );
+        assertNotNull(and);
+        assertEquals(2, and.clauses().size());
+        ExtractedPredicate.Range first = (ExtractedPredicate.Range) and.clauses().get(0);
+        assertEquals("price", first.field());
+        assertEquals(Long.valueOf(10L), first.lower());
+        ExtractedPredicate.Term second = (ExtractedPredicate.Term) and.clauses().get(1);
+        assertEquals("status", second.field());
+        assertEquals("active", second.value());
+    }
+
+    public void testGuardedThreeFieldAnd() {
+        ExtractedPredicate.And and = (ExtractedPredicate.And) extract(
+            "doc['price'].size() == 1 && doc['price'].value > 10 && "
+                + "doc['status'].size() == 1 && doc['status'].value == 'active' && "
+                + "doc['region'].size() == 1 && doc['region'].value == 'us-east'"
+        );
+        assertNotNull(and);
+        assertEquals(3, and.clauses().size());
+    }
+
+    public void testGuardedAndWithBoundedRangeBlock() {
+        // One block has two numeric comparisons that fold into a bounded range; the other
+        // block has a single term equality.
+        ExtractedPredicate.And and = (ExtractedPredicate.And) extract(
+            "doc['price'].size() == 1 && doc['price'].value > 10 && doc['price'].value < 100 && "
+                + "doc['status'].size() == 1 && doc['status'].value == 'active'"
+        );
+        assertNotNull(and);
+        assertEquals(2, and.clauses().size());
+        ExtractedPredicate.Range first = (ExtractedPredicate.Range) and.clauses().get(0);
+        assertEquals(Long.valueOf(10L), first.lower());
+        assertEquals(Long.valueOf(100L), first.upper());
+    }
+
+    public void testDeclineAndWhenBlockHasNoComparison() {
+        // `guard_a && guard_b && ...` without any comparison between guards — block A would be
+        // guard-only. Decline; a guard alone isn't a useful predicate.
+        assertNull(extract(
+            "doc['price'].size() == 1 && doc['status'].size() == 1 && doc['status'].value == 'active'"
+        ));
+    }
+
+    public void testDeclineAndWhenFirstConjunctIsNotGuard() {
+        // Chain must start with a guard. An unguarded comparison at the head means its
+        // `.value` read isn't short-circuited by any guard.
+        assertNull(extract(
+            "doc['price'].value > 10 && doc['status'].size() == 1 && doc['status'].value == 'active'"
+        ));
+    }
+
+    public void testDeclineAndWhenUnguardedConjunctAppearsAfterBlock() {
+        // Duplicate block B that's on a field with an earlier block's guard — we treat guards
+        // as block boundaries; the second guard on `price` starts a new block with only a
+        // guard and no comparison, which declines.
+        assertNull(extract(
+            "doc['price'].size() == 1 && doc['price'].value > 10 && doc['price'].size() == 1"
+        ));
+    }
 }

@@ -549,4 +549,89 @@ public abstract class ExtractedPredicate {
             return "Or" + clauses;
         }
     }
+
+    /**
+     * A conjunction of other extracted predicates, produced from multi-field guarded shapes like
+     * {@code doc['a'].size() == 1 && doc['a'].value > 10 && doc['b'].size() == 1 && doc['b'].value < 20}.
+     * Rewrites to a {@link BooleanQuery} of MUST clauses. Each clause validates itself at
+     * {@link #toQuery} time; the {@code And} carrier contributes no additional field-type gate.
+     *
+     * <p>Soundness derives from two properties the Painless phase enforces at extraction time:
+     * <ul>
+     *   <li>Each clause covers a different field, and each clause's {@code size() == 1} guard
+     *       dominates its own {@code .value} reads at runtime — per-field blocks are independent
+     *       from each other.</li>
+     *   <li>Each clause is an independently rewrite-safe shape ({@link Range}, {@link Term},
+     *       {@link Terms}, or {@link Or} on a single field).</li>
+     * </ul>
+     * Under these properties Painless' short-circuit {@code &&} and Lucene's unconditional MUST
+     * conjunction produce the same doc-matching set. In the script, block <i>k</i> only runs
+     * when every earlier block passed; in the rewrite, every MUST clause evaluates, but a doc
+     * is in the result set iff every clause matches — same outcome.
+     */
+    public static final class And extends ExtractedPredicate {
+        private final List<ExtractedPredicate> clauses;
+
+        public And(List<ExtractedPredicate> clauses) {
+            Objects.requireNonNull(clauses, "clauses");
+            if (clauses.size() < 2) {
+                // Single-block extraction is emitted as the block's predicate directly; an And of
+                // one clause would be a degenerate wrapper.
+                throw new IllegalArgumentException("And requires at least two clauses, got " + clauses.size());
+            }
+            List<ExtractedPredicate> copy = new ArrayList<>(clauses.size());
+            for (ExtractedPredicate clause : clauses) {
+                copy.add(Objects.requireNonNull(clause, "clause"));
+            }
+            this.clauses = Collections.unmodifiableList(copy);
+        }
+
+        public List<ExtractedPredicate> clauses() {
+            return clauses;
+        }
+
+        @Override
+        public Query toQuery(QueryShardContext context) {
+            return toQuery(context, Collections.emptyMap());
+        }
+
+        @Override
+        public Query toQuery(QueryShardContext context, Map<String, Object> params) {
+            BooleanQuery.Builder builder = new BooleanQuery.Builder();
+            try {
+                for (ExtractedPredicate clause : clauses) {
+                    Query clauseQuery = clause.toQuery(context, params);
+                    if (clauseQuery == null) {
+                        // Any clause that can't rewrite invalidates the whole conjunction —
+                        // a partial And would match a strict superset of what the script
+                        // matches, so we decline and let the script run.
+                        return null;
+                    }
+                    builder.add(clauseQuery, BooleanClause.Occur.MUST);
+                }
+                return builder.build();
+            } catch (IndexSearcher.TooManyClauses e) {
+                // Mirror Or: very long conjunctions (>= getMaxClauseCount()) fall back to the
+                // script path rather than failing the request.
+                return null;
+            }
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            return clauses.equals(((And) o).clauses);
+        }
+
+        @Override
+        public int hashCode() {
+            return clauses.hashCode();
+        }
+
+        @Override
+        public String toString() {
+            return "And" + clauses;
+        }
+    }
 }

@@ -168,6 +168,29 @@ public final class IndexSettings {
         Property.IndexScope
     );
 
+    /**
+     * Gates the Painless script-query predicate extraction (Layer A) — the rewrite that
+     * replaces {@code {"script":{...}}} queries with native range/term/terms/boolean queries
+     * when the script body matches a narrow grammar under a {@code size() == 1} guard.
+     *
+     * <p>Default {@code false} because the rewrite has a known soundness hole on multi-valued
+     * fields: Lucene's native field queries match a doc if <em>any</em> indexed value
+     * satisfies the predicate, but Painless' guarded script short-circuits on the
+     * {@code size() == 1} check and rejects multi-valued docs. Until Lucene exposes a
+     * cheap per-segment single-valuedness signal (apache/lucene#15794), the rewrite can
+     * return false positives on any field a user might index with an array.
+     *
+     * <p>Users who know their fields are single-valued at the application level may set this
+     * to {@code true} to opt in to the rewrite. Expect noisy hit-count changes if the
+     * assumption breaks.
+     */
+    public static final Setting<Boolean> ALLOW_PREDICATE_EXTRACTION = Setting.boolSetting(
+        "index.query.script.allow_predicate_extraction",
+        false,
+        Property.Dynamic,
+        Property.IndexScope
+    );
+
     public static final Setting<TimeValue> INDEX_TRANSLOG_SYNC_INTERVAL_SETTING = Setting.timeSetting(
         "index.translog.sync_interval",
         TimeValue.timeValueSeconds(5),
@@ -987,6 +1010,7 @@ public final class IndexSettings {
     private final RemoteStorePathStrategy remoteStorePathStrategy;
     private final boolean isTranslogMetadataEnabled;
     private volatile boolean allowDerivedField;
+    private volatile boolean allowPredicateExtraction;
     private final boolean derivedSourceEnabled;
     private final boolean pluggableDataFormatEnabled;
     private final String pluggedDataFormat;
@@ -1103,6 +1127,10 @@ public final class IndexSettings {
         this.allowDerivedField = allowDerivedField;
     }
 
+    private void setAllowPredicateExtraction(boolean allowPredicateExtraction) {
+        this.allowPredicateExtraction = allowPredicateExtraction;
+    }
+
     /**
      * Returns <code>true</code> if query string parsing should be lenient. The default is <code>false</code>
      */
@@ -1136,6 +1164,14 @@ public final class IndexSettings {
      */
     public boolean isDerivedFieldAllowed() {
         return allowDerivedField;
+    }
+
+    /**
+     * Returns {@code true} if Painless script-query predicate extraction (Layer A rewrite) is
+     * enabled for this index. Defaults to {@code false}; see {@link #ALLOW_PREDICATE_EXTRACTION}.
+     */
+    public boolean isPredicateExtractionAllowed() {
+        return allowPredicateExtraction;
     }
 
     /**
@@ -1185,6 +1221,7 @@ public final class IndexSettings {
         this.queryStringAllowLeadingWildcard = QUERY_STRING_ALLOW_LEADING_WILDCARD.get(nodeSettings);
         this.defaultAllowUnmappedFields = scopedSettings.get(ALLOW_UNMAPPED);
         this.allowDerivedField = scopedSettings.get(ALLOW_DERIVED_FIELDS);
+        this.allowPredicateExtraction = scopedSettings.get(ALLOW_PREDICATE_EXTRACTION);
         this.durability = scopedSettings.get(INDEX_TRANSLOG_DURABILITY_SETTING);
         this.translogReadForward = INDEX_TRANSLOG_READ_FORWARD_SETTING.get(settings);
         defaultFields = scopedSettings.get(DEFAULT_FIELD_SETTING);
@@ -1397,6 +1434,7 @@ public final class IndexSettings {
             this::setDocIdFuzzySetFalsePositiveProbability
         );
         scopedSettings.addSettingsUpdateConsumer(ALLOW_DERIVED_FIELDS, this::setAllowDerivedField);
+        scopedSettings.addSettingsUpdateConsumer(ALLOW_PREDICATE_EXTRACTION, this::setAllowPredicateExtraction);
         scopedSettings.addSettingsUpdateConsumer(IndexMetadata.INDEX_REMOTE_STORE_ENABLED_SETTING, this::setRemoteStoreEnabled);
         scopedSettings.addSettingsUpdateConsumer(
             IndexMetadata.INDEX_REMOTE_SEGMENT_STORE_REPOSITORY_SETTING,

@@ -168,14 +168,20 @@ public class ScriptQueryBuilder extends AbstractQueryBuilder<ScriptQueryBuilder>
             );
         }
         FilterScript.Factory factory = context.compile(script, FilterScript.CONTEXT);
-        ExtractedPredicate extracted = factory.extractedPredicate();
-        if (extracted != null) {
-            Query rewrite = extracted.toQuery(context, script.getParams());
-            if (rewrite != null) {
-                // AbstractQueryBuilder.toQuery takes care of boost wrapping and named-query
-                // registration, so we only need to wrap in ConstantScoreQuery to match the
-                // "script always scores 1.0" semantics of the fallback path.
-                return new ConstantScoreQuery(rewrite);
+        // Layer A predicate extraction is off by default because the rewrite has a known
+        // soundness hole on multi-valued fields (see Known limitations in DESIGN-script-query-
+        // acceleration.md and apache/lucene#15794). Opt-in per index via the
+        // `index.query.script.allow_predicate_extraction` setting.
+        if (context.getIndexSettings().isPredicateExtractionAllowed()) {
+            ExtractedPredicate extracted = factory.extractedPredicate();
+            if (extracted != null) {
+                Query rewrite = extracted.toQuery(context, script.getParams());
+                if (rewrite != null) {
+                    // AbstractQueryBuilder.toQuery takes care of boost wrapping and named-query
+                    // registration, so we only need to wrap in ConstantScoreQuery to match the
+                    // "script always scores 1.0" semantics of the fallback path.
+                    return new ConstantScoreQuery(rewrite);
+                }
             }
         }
         FilterScript.LeafFactory filterScript = factory.newFactory(script.getParams(), context.lookup());

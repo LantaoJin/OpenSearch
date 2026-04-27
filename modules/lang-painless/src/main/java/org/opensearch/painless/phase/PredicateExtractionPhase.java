@@ -123,34 +123,68 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
         if (collectAndChain(expr, conjuncts) == false) {
             return null;
         }
-        String guardedField = null;
-        int guardIndex = -1;
-        for (int i = 0; i < conjuncts.size(); i++) {
-            String field = extractSizeGuardField(conjuncts.get(i));
-            if (field == null) {
-                continue;
-            }
-            if (guardedField != null) {
-                // Multiple guards complicate dominance reasoning; conservative decline.
+        // Partition the chain into per-field blocks. Each block starts with a size()==1 guard
+        // and contains the following conjuncts until the next guard. Multi-field guarded
+        // predicates compose as an And of per-block extractions; a single block emits its
+        // predicate directly (avoiding a degenerate And-of-one wrapper).
+        List<ExtractedPredicate> blockPredicates = new ArrayList<>();
+        int i = 0;
+        while (i < conjuncts.size()) {
+            String guardedField = extractSizeGuardField(conjuncts.get(i));
+            if (guardedField == null) {
+                // A non-guard conjunct at block boundary means the chain doesn't start with a
+                // guard. Decline — we require each block's `.value` reads to be dominated by
+                // its own guard.
                 return null;
             }
-            guardedField = field;
-            guardIndex = i;
+            int start = i + 1;
+            int end = start;
+            while (end < conjuncts.size() && extractSizeGuardField(conjuncts.get(end)) == null) {
+                end++;
+            }
+            if (end == start) {
+                // Guard without any trailing comparisons isn't a useful predicate on its own.
+                return null;
+            }
+            ExtractedPredicate block = extractGuardedBlock(guardedField, conjuncts.subList(start, end));
+            if (block == null) {
+                return null;
+            }
+            blockPredicates.add(block);
+            i = end;
         }
-        if (guardedField == null) {
+        if (blockPredicates.isEmpty()) {
             return null;
         }
-
-        // `guard && <single-conjunct>` covers Term, Terms, single-comparison Range, and Or of
-        // same-field comparisons. Multi-comparison numeric chains (bounded ranges combined via
-        // `&&`) flow through the bound-folding loop below.
-        if (guardIndex == 0 && conjuncts.size() == 2) {
-            ExtractedPredicate predicate = tryExtractSingleConjunct(conjuncts.get(1), guardedField);
-            if (predicate != null) {
-                return predicate;
-            }
+        if (blockPredicates.size() == 1) {
+            return blockPredicates.get(0);
         }
+        return new ExtractedPredicate.And(blockPredicates);
+    }
 
+    /**
+     * Extract a single per-field block: one guard followed by one or more comparisons on that
+     * field. The block shape mirrors the original single-block grammar:
+     * <ul>
+     *   <li>Exactly one comparison → {@link #tryExtractSingleConjunct} dispatches into
+     *       {@link ExtractedPredicate.Term}, {@link ExtractedPredicate.Terms},
+     *       {@link ExtractedPredicate.Or}, or a single-bound
+     *       {@link ExtractedPredicate.Range}.</li>
+     *   <li>Multiple comparisons → numeric {@link ExtractedPredicate.Range} via the bound-
+     *       folding loop. All comparisons must be on the guarded field.</li>
+     * </ul>
+     */
+    private static ExtractedPredicate extractGuardedBlock(String guardedField, List<AExpression> comparisons) {
+        if (comparisons.size() == 1) {
+            ExtractedPredicate single = tryExtractSingleConjunct(comparisons.get(0), guardedField);
+            if (single != null) {
+                return single;
+            }
+            // Fall through: a single numeric comparison can also be handled by the range-folding
+            // loop below. The short-circuit above already covers it via
+            // tryExtractSingleComparisonRange, so this is only reached if the single conjunct
+            // wasn't recognisable as any shape — and the loop will reject it identically.
+        }
         // Accumulated bounds. Each side holds either a Long literal, a ParamRef, or null
         // (unbounded). Bound folding at compile time can only tighten when both the existing and
         // incoming bound are Long literals — any Long-vs-ParamRef or ParamRef-vs-ParamRef mix
@@ -162,14 +196,7 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
         boolean includeUpper = true;
         String comparisonField = null;
         boolean sawComparison = false;
-        for (int i = 0; i < conjuncts.size(); i++) {
-            if (i == guardIndex) {
-                continue;
-            }
-            if (i < guardIndex) {
-                return null;
-            }
-            AExpression conjunct = conjuncts.get(i);
+        for (AExpression conjunct : comparisons) {
             if ((conjunct instanceof EComp) == false) {
                 return null;
             }

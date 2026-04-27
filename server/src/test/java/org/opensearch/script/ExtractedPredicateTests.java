@@ -540,6 +540,98 @@ public class ExtractedPredicateTests extends OpenSearchTestCase {
         assertNotEquals(a, c);
     }
 
+    public void testAndIntersectsClauses() {
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType statusType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        KeywordFieldMapper.KeywordFieldType tierType = spy(new KeywordFieldMapper.KeywordFieldType("tier"));
+        Query firstClauseQuery = new MatchAllDocsQuery();
+        Query secondClauseQuery = new org.apache.lucene.search.MatchNoDocsQuery("second");
+        when(context.fieldMapper("status")).thenReturn(statusType);
+        when(context.fieldMapper("tier")).thenReturn(tierType);
+        doReturn(firstClauseQuery).when(statusType).termQuery("a", context);
+        doReturn(secondClauseQuery).when(tierType).termQuery("b", context);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.And(java.util.Arrays.asList(
+            new ExtractedPredicate.Term("status", "a"),
+            new ExtractedPredicate.Term("tier", "b")
+        ));
+
+        Query query = predicate.toQuery(context);
+        assertTrue("expected BooleanQuery, got " + query, query instanceof org.apache.lucene.search.BooleanQuery);
+        org.apache.lucene.search.BooleanQuery bq = (org.apache.lucene.search.BooleanQuery) query;
+        assertEquals(2, bq.clauses().size());
+        for (org.apache.lucene.search.BooleanClause clause : bq.clauses()) {
+            assertEquals("each clause must be MUST", org.apache.lucene.search.BooleanClause.Occur.MUST, clause.occur());
+        }
+        assertSame(firstClauseQuery, bq.clauses().get(0).query());
+        assertSame(secondClauseQuery, bq.clauses().get(1).query());
+    }
+
+    public void testAndDeclinesWhenAnyClauseReturnsNull() {
+        // A field-type gate mismatch on any single clause must invalidate the whole
+        // conjunction — a partial And would match a superset of what the script matches.
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType statusType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        when(context.fieldMapper("status")).thenReturn(statusType);
+        // "tier" is unmapped → second clause's toQuery returns null.
+        when(context.fieldMapper("tier")).thenReturn(null);
+        doReturn(new MatchAllDocsQuery()).when(statusType).termQuery(any(), any());
+
+        ExtractedPredicate predicate = new ExtractedPredicate.And(java.util.Arrays.asList(
+            new ExtractedPredicate.Term("status", "a"),
+            new ExtractedPredicate.Term("tier", "b")
+        ));
+
+        assertNull(predicate.toQuery(context));
+    }
+
+    public void testAndDeclinesWhenClauseCountExceedsBooleanLimit() {
+        // Mirror the Or TooManyClauses regression: a giant conjunction must fall back to the
+        // script path rather than fail the request.
+        QueryShardContext context = mock(QueryShardContext.class);
+        int max = org.apache.lucene.search.IndexSearcher.getMaxClauseCount();
+        java.util.List<ExtractedPredicate> clauses = new java.util.ArrayList<>(max + 1);
+        Query dummy = new MatchAllDocsQuery();
+        for (int i = 0; i < max + 1; i++) {
+            clauses.add(new ExtractedPredicate() {
+                @Override
+                public Query toQuery(QueryShardContext c) {
+                    return dummy;
+                }
+            });
+        }
+
+        ExtractedPredicate predicate = new ExtractedPredicate.And(clauses);
+        assertNull("And must fall back to the script rather than throw TooManyClauses", predicate.toQuery(context));
+    }
+
+    public void testAndRequiresAtLeastTwoClauses() {
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> new ExtractedPredicate.And(Collections.singletonList(new ExtractedPredicate.Term("status", "a")))
+        );
+    }
+
+    public void testAndEqualsAndHashCode() {
+        ExtractedPredicate.And a = new ExtractedPredicate.And(java.util.Arrays.asList(
+            new ExtractedPredicate.Term("status", "x"),
+            new ExtractedPredicate.Term("tier", "y")
+        ));
+        ExtractedPredicate.And b = new ExtractedPredicate.And(java.util.Arrays.asList(
+            new ExtractedPredicate.Term("status", "x"),
+            new ExtractedPredicate.Term("tier", "y")
+        ));
+        ExtractedPredicate.And c = new ExtractedPredicate.And(java.util.Arrays.asList(
+            new ExtractedPredicate.Term("tier", "y"),
+            new ExtractedPredicate.Term("status", "x")
+        ));
+        assertEquals(a, b);
+        assertEquals(a.hashCode(), b.hashCode());
+        // Order-sensitive — MUST clauses execute in order even if the intersection set is the
+        // same; treating reorderings as equal would hide genuine AST differences.
+        assertNotEquals(a, c);
+    }
+
     public void testEqualsAndHashCode() {
         ExtractedPredicate.Range a = new ExtractedPredicate.Range("price", 1L, 10L, true, false);
         ExtractedPredicate.Range b = new ExtractedPredicate.Range("price", 1L, 10L, true, false);

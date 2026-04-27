@@ -38,13 +38,22 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         return Collections.singleton(PainlessModulePlugin.class);
     }
 
+    /**
+     * Predicate extraction is off by default because of a known multi-value soundness hole
+     * (see Known limitations in DESIGN-script-query-acceleration.md and apache/lucene#15794).
+     * Every rewrite test here opts in via this index-level setting.
+     */
+    private static final Settings REWRITE_ENABLED = Settings.builder()
+        .put(org.opensearch.index.IndexSettings.ALLOW_PREDICATE_EXTRACTION.getKey(), true)
+        .build();
+
     /** {@code ScriptQueryBuilder.ScriptQuery} is package-private so we can't import it from here. */
     private static boolean isScriptQuery(Query query) {
         return query != null && "ScriptQuery".equals(query.getClass().getSimpleName());
     }
 
     public void testGuardedScriptRewritesToNativeRange() throws IOException {
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "price", "type=long");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -61,7 +70,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
     }
 
     public void testBoundedRangeRewritesToNativeRange() throws IOException {
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "price", "type=long");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -76,7 +85,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
     }
 
     public void testUnguardedScriptStaysOnScriptQuery() throws IOException {
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "price", "type=long");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         // Bare .value read — unsafe on missing docs, must not rewrite.
@@ -90,7 +99,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         // Regression guard for the multi-valued unsoundness: `size() != 0` rules out missing docs
         // but not multi-valued docs, where Painless' `get(0)` diverges from a native range query.
         // The phase must decline and the query must stay on ScriptQuery.
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "price", "type=long");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -102,7 +111,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
     }
 
     public void testGuardedStringEqualityRewritesToTerm() throws IOException {
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -117,7 +126,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
 
     public void testPresenceOnlyGuardStringEqualityStaysOnScriptQuery() throws IOException {
         // Same multi-value soundness check as the numeric case: `size() != 0` isn't enough.
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -135,7 +144,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         // `doc.get('f')` / `.getValue()` accept the same rewrite as `doc['f']` / `.value`. End-to-
         // end check that the phase + carrier still produce a ConstantScoreQuery for a mix of alt
         // spellings in the guard and the read.
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "price", "type=long");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -149,7 +158,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
     }
 
     public void testGuardedListContainsRewritesToTerms() throws IOException {
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -166,7 +175,10 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         // Same normalizer divergence that blocks the Term rewrite applies to Terms: a normalizer
         // would lowercase each list element, so `['Active']` would match docs storing `active`
         // even though Painless' `.equals()` against the raw value returns false.
-        Settings settings = Settings.builder().putList("index.analysis.normalizer.my_lower.filter", "lowercase").build();
+        Settings settings = Settings.builder()
+            .putList("index.analysis.normalizer.my_lower.filter", "lowercase")
+            .put(org.opensearch.index.IndexSettings.ALLOW_PREDICATE_EXTRACTION.getKey(), true)
+            .build();
         IndexService index = createIndexWithSimpleMappings("idx", settings, "status", "type=keyword,normalizer=my_lower");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
@@ -182,7 +194,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
     }
 
     public void testGuardedOrRewritesToBooleanShould() throws IOException {
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "price", "type=long");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -201,8 +213,38 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         assertEquals(2, bq.clauses().size());
     }
 
+    public void testGuardedMultiFieldAndRewritesToBooleanMust() throws IOException {
+        IndexService index = createIndexWithSimpleMappings(
+            "idx",
+            REWRITE_ENABLED,
+            "price",
+            "type=long",
+            "status",
+            "type=keyword"
+        );
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(
+                "doc['price'].size() == 1 && doc['price'].value > 10 && "
+                    + "doc['status'].size() == 1 && doc['status'].value == 'active'"
+            )
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("guarded multi-field And must rewrite, got " + query, query instanceof ConstantScoreQuery);
+        Query inner = ((ConstantScoreQuery) query).getQuery();
+        assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
+        assertTrue("expected a BooleanQuery inside, got " + inner, inner instanceof org.apache.lucene.search.BooleanQuery);
+        org.apache.lucene.search.BooleanQuery bq = (org.apache.lucene.search.BooleanQuery) inner;
+        assertEquals(2, bq.clauses().size());
+        for (org.apache.lucene.search.BooleanClause clause : bq.clauses()) {
+            assertEquals("each clause must be MUST", org.apache.lucene.search.BooleanClause.Occur.MUST, clause.occur());
+        }
+    }
+
     public void testUnguardedOrStaysOnScriptQuery() throws IOException {
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "price", "type=long");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -217,7 +259,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         // Pre-existing hole closed: KeywordFieldType.rangeQuery stringifies numeric bounds into
         // a lexicographic range, which doesn't match Painless' DefMath.gt/lt throw-on-type-
         // mismatch semantics. The Range.toQuery gate must decline the rewrite.
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -232,7 +274,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         // Mixed Term + Range arm on a keyword field: the Range arm's gate declines (keyword
         // isn't a NumberFieldType), so the whole Or declines. Before the gate, the range arm
         // would have stringified `10` lexicographically and diverged from Painless.
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -250,7 +292,10 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         // normalizer lowercases the search literal before lookup, so `termQuery('Active')`
         // matches docs storing `active` — but Painless' `doc['status'].value == 'Active'` reads
         // the raw `active` and returns false. The rewrite must decline and let the script run.
-        Settings settings = Settings.builder().putList("index.analysis.normalizer.my_lower.filter", "lowercase").build();
+        Settings settings = Settings.builder()
+            .putList("index.analysis.normalizer.my_lower.filter", "lowercase")
+            .put(org.opensearch.index.IndexSettings.ALLOW_PREDICATE_EXTRACTION.getKey(), true)
+            .build();
         IndexService index = createIndexWithSimpleMappings("idx", settings, "status", "type=keyword,normalizer=my_lower");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
@@ -269,7 +314,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         // Regression guard for text-field divergence. `termQuery` on a text field searches the
         // analyzed inverted index; the script reads raw fielddata (or throws if fielddata is
         // disabled). Different result sets in either direction — the rewrite must decline.
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "title", "type=text");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "title", "type=text");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -281,7 +326,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
     }
 
     public void testGuardedScriptWithParamRewritesToNativeRange() throws IOException {
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "price", "type=long");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         Map<String, Object> params = new HashMap<>();
@@ -297,7 +342,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
     }
 
     public void testGuardedStringEqualityAgainstParamRewritesToTerm() throws IOException {
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         Map<String, Object> params = new HashMap<>();
@@ -316,7 +361,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         // Painless' `String.equals(Integer)` returns false, never throws. The rewrite would
         // stringify the number and match a doc whose keyword literally equals that string —
         // strictly more permissive. Must decline.
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "status", "type=keyword");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         Map<String, Object> params = new HashMap<>();
@@ -333,7 +378,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         // Painless compiles `long > Object` via DefMath.gt, which throws on Long-vs-String. The
         // rewrite must match that semantics and decline a String-valued numeric param, not
         // silently parse it via MappedFieldType.rangeQuery.
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "price", "type=long");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         Map<String, Object> params = new HashMap<>();
@@ -349,7 +394,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
     public void testMissingParamFallsBackToScript() throws IOException {
         // Missing `params.threshold` at query-build time. A' resolution rule: decline so the
         // script runs and the user sees the exception, rather than a silent match-all range.
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "price", "type=long");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "price", "type=long");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
@@ -368,7 +413,7 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
     public void testUnmappedFieldFallsBackToScript() throws IOException {
         // Range.toQuery returns null when the field is unmapped; doToQuery must fall back to the
         // script path rather than emitting a broken rewrite.
-        IndexService index = createIndexWithSimpleMappings("idx", Settings.EMPTY, "other", "type=long");
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "other", "type=long");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
 
         ScriptQueryBuilder builder = new ScriptQueryBuilder(
