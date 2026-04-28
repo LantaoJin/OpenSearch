@@ -266,6 +266,40 @@ public class RewriteEquivalenceTests extends OpenSearchSingleNodeTestCase {
         );
     }
 
+    // --- Not --------------------------------------------------------------
+
+    public void testNotEqualOnKeyword() {
+        assertEquivalent("doc['status'].size() == 1 && doc['status'].value != 'active'");
+    }
+
+    public void testNotEqualOnKeywordWithParam() {
+        Map<String, Object> params = new HashMap<>();
+        params.put("expected", "pending");
+        assertEquivalent(
+            "doc['status'].size() == 1 && doc['status'].value != params.expected",
+            params
+        );
+    }
+
+    public void testNotEqualNumeric() {
+        assertEquivalent("doc['price'].size() == 1 && doc['price'].value != 10");
+    }
+
+    public void testNotListContains() {
+        assertEquivalent(
+            "doc['status'].size() == 1 && !['active', 'archived'].contains(doc['status'].value)"
+        );
+    }
+
+    public void testNotWholeListParamContains() {
+        Map<String, Object> params = new HashMap<>();
+        params.put("statusList", java.util.Arrays.asList("active", "archived"));
+        assertEquivalent(
+            "doc['status'].size() == 1 && !params.statusList.contains(doc['status'].value)",
+            params
+        );
+    }
+
     // --- harness -----------------------------------------------------------
 
     private void assertEquivalent(String painless) {

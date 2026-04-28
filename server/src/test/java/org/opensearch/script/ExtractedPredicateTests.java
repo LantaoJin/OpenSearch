@@ -755,6 +755,83 @@ public class ExtractedPredicateTests extends OpenSearchTestCase {
         assertNotEquals(a, c);
     }
 
+    // --- Not --------------------------------------------------------------
+
+    public void testNotWrapsInnerInMustNotOverExists() {
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        Query innerQuery = new MatchAllDocsQuery();
+        Query existsQuery = new org.apache.lucene.search.FieldExistsQuery("status");
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+        doReturn(innerQuery).when(fieldType).termQuery("active", context);
+        doReturn(existsQuery).when(fieldType).existsQuery(context);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Not("status", new ExtractedPredicate.Term("status", "active"));
+        Query query = predicate.toQuery(context);
+
+        assertTrue("Not must rewrite to a BooleanQuery, got " + query, query instanceof org.apache.lucene.search.BooleanQuery);
+        org.apache.lucene.search.BooleanQuery bool = (org.apache.lucene.search.BooleanQuery) query;
+        assertEquals(2, bool.clauses().size());
+        // Exactly one MUST exists clause and one MUST_NOT clause carrying the inner query. The
+        // MUST exists closes the missing-doc hole: without it, docs with no value for `field`
+        // would be included (MUST_NOT doesn't exclude non-matching docs), diverging from the
+        // script's guard-based missing-doc bail.
+        boolean sawExistsMust = false;
+        boolean sawInnerMustNot = false;
+        for (org.apache.lucene.search.BooleanClause c : bool.clauses()) {
+            if (c.occur() == org.apache.lucene.search.BooleanClause.Occur.MUST && c.query() == existsQuery) {
+                sawExistsMust = true;
+            } else if (c.occur() == org.apache.lucene.search.BooleanClause.Occur.MUST_NOT && c.query() == innerQuery) {
+                sawInnerMustNot = true;
+            }
+        }
+        assertTrue("expected MUST existsQuery clause", sawExistsMust);
+        assertTrue("expected MUST_NOT inner clause", sawInnerMustNot);
+    }
+
+    public void testNotDeclinesWhenInnerDeclines() {
+        // Inner Term's KeywordFieldType-only gate blocks the rewrite on a non-keyword field.
+        // Not must cascade the decline rather than emit exists-minus-nothing (which would
+        // silently match every doc that has a value — strictly more permissive than the script).
+        QueryShardContext context = mock(QueryShardContext.class);
+        NumberFieldMapper.NumberFieldType numericType = spy(
+            new NumberFieldMapper.NumberFieldType("price", NumberFieldMapper.NumberType.LONG)
+        );
+        when(context.fieldMapper("price")).thenReturn(numericType);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Not("price", new ExtractedPredicate.Term("price", "10"));
+        assertNull(predicate.toQuery(context));
+    }
+
+    public void testNotDeclinesWhenFieldMissingFromContext() {
+        // Field name the Not was constructed with isn't in the mapping — the exists-clause
+        // can't be built, and a Not-without-exists would silently include missing-field docs.
+        QueryShardContext context = mock(QueryShardContext.class);
+        when(context.fieldMapper("status")).thenReturn(null);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Not("status", new ExtractedPredicate.Term("status", "active"));
+        assertNull(predicate.toQuery(context));
+    }
+
+    public void testNotEqualsAndHashCode() {
+        ExtractedPredicate.Not a = new ExtractedPredicate.Not("status", new ExtractedPredicate.Term("status", "active"));
+        ExtractedPredicate.Not b = new ExtractedPredicate.Not("status", new ExtractedPredicate.Term("status", "active"));
+        ExtractedPredicate.Not c = new ExtractedPredicate.Not("status", new ExtractedPredicate.Term("status", "pending"));
+        ExtractedPredicate.Not d = new ExtractedPredicate.Not("tier", new ExtractedPredicate.Term("status", "active"));
+        assertEquals(a, b);
+        assertEquals(a.hashCode(), b.hashCode());
+        assertNotEquals(a, c);
+        assertNotEquals(a, d);
+    }
+
+    public void testNotRejectsNullInner() {
+        expectThrows(NullPointerException.class, () -> new ExtractedPredicate.Not("f", null));
+    }
+
+    public void testNotRejectsNullField() {
+        expectThrows(NullPointerException.class, () -> new ExtractedPredicate.Not(null, new ExtractedPredicate.Term("f", "x")));
+    }
+
     private static boolean anyBoolean() {
         return org.mockito.ArgumentMatchers.anyBoolean();
     }

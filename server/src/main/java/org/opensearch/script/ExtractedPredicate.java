@@ -688,4 +688,111 @@ public abstract class ExtractedPredicate {
             return "And" + clauses;
         }
     }
+
+    /**
+     * Negation of another extracted predicate, produced from shapes like
+     * {@code doc['f'].size() == 1 && doc['f'].value != 'active'} or
+     * {@code doc['f'].size() == 1 && !['a','b'].contains(doc['f'].value)}. Rewrites to a
+     * {@link BooleanQuery} of {@code MUST existsQuery(field)} + {@code MUST_NOT inner.toQuery},
+     * i.e. Lucene's "every doc that has a value for {@code field} except those matching inner".
+     *
+     * <p>Soundness under the shared {@code size() == 1} guard requires two things:
+     * <ol>
+     *   <li><b>Missing docs</b> are excluded by the script's guard. The native {@code MUST_NOT
+     *       Term('active')} alone would <i>include</i> docs with no value for {@code field}
+     *       (they don't match the term, so MUST_NOT doesn't exclude them), whereas Painless'
+     *       guard bails on them. The {@code MUST existsQuery(field)} clause closes this by
+     *       requiring every result to have a value for {@code field}, mirroring the guard's
+     *       missing-doc exclusion.</li>
+     *   <li><b>Multi-valued docs</b> are excluded by the script's {@code size() == 1} guard
+     *       but are still matched by native {@code MUST existsQuery} + {@code MUST_NOT}. This
+     *       is exactly the multi-valued soundness hole that makes the whole feature default-
+     *       off (see {@code ALLOW_PREDICATE_EXTRACTION} setting + {@code
+     *       MultiValueRewriteSemanticsTests}). For multi-valued docs, native MUST_NOT excludes
+     *       docs where <i>any</i> value matches the negated shape, whereas Painless excludes
+     *       docs where the <i>first</i> value matches. Under the branch's default-off guard,
+     *       the benchmark's single-valued corpora avoid this case.</li>
+     * </ol>
+     *
+     * <p>A {@code Not} whose {@code inner} clause declines its own rewrite (returns
+     * {@code null}) also declines — a partial negation (matching everything with an exists
+     * clause) would be strictly more permissive than the script. Likewise, the field used for
+     * the exists clause must have a working {@code existsQuery}; any exception declines the
+     * whole Not.
+     */
+    public static final class Not extends ExtractedPredicate {
+        private final String field;
+        private final ExtractedPredicate inner;
+
+        /**
+         * @param field the name of the field whose guard the {@code Not} depends on — used to
+         *              build the {@code existsQuery(field)} exclusion of missing-valued docs
+         *              (see class javadoc). Must be the same field the guard protects and the
+         *              inner predicate reads.
+         * @param inner the positive predicate to negate (e.g. {@code Term}, {@code Terms},
+         *              {@code Range})
+         */
+        public Not(String field, ExtractedPredicate inner) {
+            this.field = Objects.requireNonNull(field, "field");
+            this.inner = Objects.requireNonNull(inner, "inner");
+        }
+
+        public String field() {
+            return field;
+        }
+
+        public ExtractedPredicate inner() {
+            return inner;
+        }
+
+        @Override
+        public Query toQuery(QueryShardContext context) {
+            return toQuery(context, Collections.emptyMap());
+        }
+
+        @Override
+        public Query toQuery(QueryShardContext context, Map<String, Object> params) {
+            MappedFieldType fieldType = context.fieldMapper(field);
+            if (fieldType == null) {
+                return null;
+            }
+            Query innerQuery = inner.toQuery(context, params);
+            if (innerQuery == null) {
+                // Inner declined (field-type gate, param resolution, etc.). Without the inner,
+                // the Not would collapse to "exists(field)", which is strictly more permissive
+                // than the script. Decline and let the script run.
+                return null;
+            }
+            Query existsQuery;
+            try {
+                existsQuery = fieldType.existsQuery(context);
+            } catch (IllegalArgumentException | UnsupportedOperationException e) {
+                // Field types without a working existsQuery can't build the missing-doc
+                // exclusion; without it the MUST_NOT would silently include missing docs.
+                return null;
+            }
+            return new BooleanQuery.Builder()
+                .add(existsQuery, BooleanClause.Occur.MUST)
+                .add(innerQuery, BooleanClause.Occur.MUST_NOT)
+                .build();
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            Not n = (Not) o;
+            return field.equals(n.field) && inner.equals(n.inner);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(field, inner);
+        }
+
+        @Override
+        public String toString() {
+            return "Not{field='" + field + "', inner=" + inner + '}';
+        }
+    }
 }

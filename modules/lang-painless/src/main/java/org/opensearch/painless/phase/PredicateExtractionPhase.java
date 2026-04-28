@@ -288,12 +288,21 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
      *   <li>{@link EBooleanComp} with {@code OR} → {@link ExtractedPredicate.Or} of sub-shapes.</li>
      *   <li>{@link EComp} with {@code ==} on a string literal or {@code params.x} →
      *       {@link ExtractedPredicate.Term}.</li>
+     *   <li>{@link EComp} with {@code !=} on a string literal, {@code params.x}, or a numeric
+     *       operand → {@link ExtractedPredicate.Not} of the corresponding positive shape.</li>
      *   <li>{@link EComp} on numeric bounds → single-bound {@link ExtractedPredicate.Range}.</li>
      *   <li>{@link ECall} {@code list.contains(field)} →
      *       {@link ExtractedPredicate.Terms}.</li>
+     *   <li>{@link EUnary} {@code !list.contains(field)} →
+     *       {@link ExtractedPredicate.Not} of {@link ExtractedPredicate.Terms}.</li>
      * </ul>
      * Each sub-helper enforces the guarded-field and field-type requirements; this method is a
      * pure dispatcher.
+     *
+     * <p>Soundness of {@code Not}: the shared {@code size() == 1} guard already excludes missing
+     * and multi-valued docs before any {@code .value} read, so negating a rewrite-safe shape
+     * over the single-valued docs is equivalent to Painless' {@code !=} / {@code !contains} on
+     * the same docs. See {@link ExtractedPredicate.Not} for the full argument.
      */
     private static ExtractedPredicate tryExtractSingleConjunct(AExpression expr, String guardedField) {
         if (expr instanceof EBooleanComp) {
@@ -301,6 +310,9 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
         }
         if (expr instanceof EComp) {
             EComp comp = (EComp) expr;
+            if (comp.getOperation() == Operation.NE) {
+                return tryExtractNotFromNe(comp, guardedField);
+            }
             ExtractedPredicate.Term term = tryExtractTerm(comp, guardedField);
             if (term != null) {
                 return term;
@@ -310,7 +322,77 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
         if (expr instanceof ECall) {
             return tryExtractTerms((ECall) expr, guardedField);
         }
+        if (expr instanceof EUnary) {
+            EUnary unary = (EUnary) expr;
+            if (unary.getOperation() == Operation.NOT && unary.getChildNode() instanceof ECall) {
+                ExtractedPredicate.Terms terms = tryExtractTerms((ECall) unary.getChildNode(), guardedField);
+                if (terms != null) {
+                    return new ExtractedPredicate.Not(guardedField, terms);
+                }
+            }
+            return null;
+        }
         return null;
+    }
+
+    /**
+     * Extract a {@code !=} comparison as {@code Not(positive-shape)}. Dispatches by the
+     * non-field operand:
+     * <ul>
+     *   <li>String literal or {@code params.x} (String-only gate) →
+     *       {@link ExtractedPredicate.Not} of {@link ExtractedPredicate.Term}.</li>
+     *   <li>Numeric literal or {@code params.x} (Number-only gate) →
+     *       {@link ExtractedPredicate.Not} of a single-value {@link ExtractedPredicate.Range}
+     *       ({@code [lit, lit]}), which is the native form of "doc does not equal this value".</li>
+     * </ul>
+     * Returns {@code null} when neither shape matches or the operand type would make the
+     * rewrite silently more permissive than Painless' {@code DefMath.eq} (the same gates used
+     * by the {@code ==} path).
+     */
+    private static ExtractedPredicate tryExtractNotFromNe(EComp comp, String guardedField) {
+        // Try Term-shape first. Mirrors tryExtractTerm's operand recognition but with NE.
+        String leftField = extractDocField(comp.getLeftNode());
+        Object rightValue = extractStringOrParamRef(comp.getRightNode());
+        String termField;
+        Object termValue;
+        if (leftField != null && rightValue != null) {
+            termField = leftField;
+            termValue = rightValue;
+        } else {
+            String rightField = extractDocField(comp.getRightNode());
+            Object leftValue = extractStringOrParamRef(comp.getLeftNode());
+            if (rightField != null && leftValue != null) {
+                termField = rightField;
+                termValue = leftValue;
+            } else {
+                termField = null;
+                termValue = null;
+            }
+        }
+        if (termField != null && termField.equals(guardedField)) {
+            return new ExtractedPredicate.Not(guardedField, new ExtractedPredicate.Term(termField, termValue));
+        }
+        // Fall through to numeric Not(Range). `ComparisonShape.of` accepts NE, but
+        // `applyBound` deliberately declines it for the positive Range path — we build the
+        // single-value Range here instead.
+        ComparisonShape shape = ComparisonShape.of(comp);
+        if (shape == null || guardedField.equals(shape.field) == false) {
+            return null;
+        }
+        if (shape.op != Operation.NE) {
+            // flip(NE) returned something else because the operand was on the left — defensively
+            // this only happens if ComparisonShape.of changes; keep the guard so the method stays
+            // total if it does.
+            return null;
+        }
+        if (shape.operand instanceof Long == false) {
+            // Numeric NE against params.x: decline. The positive form `== params.x` is also
+            // declined by applyBound (it needs Range.equalTo to be a compile-time literal).
+            // Once that's lifted we can also lift this.
+            return null;
+        }
+        Long eq = (Long) shape.operand;
+        return new ExtractedPredicate.Not(guardedField, new ExtractedPredicate.Range(shape.field, eq, eq, true, true));
     }
 
     /**

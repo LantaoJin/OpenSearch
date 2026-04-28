@@ -530,4 +530,59 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         Query query = builder.toQuery(context);
         assertTrue("unmapped field must fall back to ScriptQuery, got " + query, isScriptQuery(query));
     }
+
+    public void testGuardedNotEqualOnKeywordRewritesToBooleanMustNot() throws IOException {
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc['status'].size() == 1 && doc['status'].value != 'active'")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("guarded != must rewrite, got " + query, query instanceof ConstantScoreQuery);
+        Query inner = ((ConstantScoreQuery) query).getQuery();
+        assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
+        assertTrue("rewrite must be BooleanQuery, got " + inner, inner instanceof org.apache.lucene.search.BooleanQuery);
+    }
+
+    public void testGuardedNotEqualNumericRewrites() throws IOException {
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "price", "type=long");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc['price'].size() == 1 && doc['price'].value != 10")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("guarded numeric != must rewrite, got " + query, query instanceof ConstantScoreQuery);
+        Query inner = ((ConstantScoreQuery) query).getQuery();
+        assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
+    }
+
+    public void testGuardedNotListContainsRewrites() throws IOException {
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc['status'].size() == 1 && !['active', 'pending'].contains(doc['status'].value)")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("guarded !list.contains must rewrite, got " + query, query instanceof ConstantScoreQuery);
+        Query inner = ((ConstantScoreQuery) query).getQuery();
+        assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
+    }
+
+    public void testUnguardedNotEqualStaysOnScriptQuery() throws IOException {
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script("doc['status'].value != 'active'")
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("unguarded != must stay on ScriptQuery, got " + query, isScriptQuery(query));
+    }
 }

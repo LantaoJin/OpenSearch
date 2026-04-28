@@ -209,10 +209,8 @@ public class PredicateExtractionPhaseTests extends ScriptTestCase {
         assertEquals("active", t.value());
     }
 
-    public void testDeclineStringInequality() {
-        // `!=` on a Term has no clean single-query Lucene equivalent.
-        assertNull(extract("doc['status'].size() == 1 && doc['status'].value != 'active'"));
-    }
+    // `doc['status'].value != 'active'` is now a rewrite-safe shape under the guard — it emits
+    // `Not(Term)`. See `testGuardedNotEqualOnStringEmitsNotTerm` in the Not section below.
 
     public void testDeclineStringEqualityWithoutGuard() {
         assertNull(extract("doc['status'].value == 'active'"));
@@ -693,6 +691,105 @@ public class PredicateExtractionPhaseTests extends ScriptTestCase {
         // guard and no comparison, which declines.
         assertNull(extract(
             "doc['price'].size() == 1 && doc['price'].value > 10 && doc['price'].size() == 1"
+        ));
+    }
+
+    // --- Not (!= and !list.contains) → Not carrier -----------------------
+
+    public void testGuardedNotEqualOnStringEmitsNotTerm() {
+        ExtractedPredicate.Not not = (ExtractedPredicate.Not) extract(
+            "doc['status'].size() == 1 && doc['status'].value != 'active'"
+        );
+        assertNotNull(not);
+        ExtractedPredicate.Term inner = (ExtractedPredicate.Term) not.inner();
+        assertEquals("status", inner.field());
+        assertEquals("active", inner.value());
+    }
+
+    public void testGuardedNotEqualOnStringLiteralOnLeft() {
+        ExtractedPredicate.Not not = (ExtractedPredicate.Not) extract(
+            "doc['status'].size() == 1 && 'active' != doc['status'].value"
+        );
+        assertNotNull(not);
+        ExtractedPredicate.Term inner = (ExtractedPredicate.Term) not.inner();
+        assertEquals("status", inner.field());
+        assertEquals("active", inner.value());
+    }
+
+    public void testGuardedNotEqualOnParamStringEmitsNotTermParam() {
+        ExtractedPredicate.Not not = (ExtractedPredicate.Not) extract(
+            "doc['status'].size() == 1 && doc['status'].value != params.expected"
+        );
+        assertNotNull(not);
+        ExtractedPredicate.Term inner = (ExtractedPredicate.Term) not.inner();
+        assertEquals("status", inner.field());
+        assertEquals(new ExtractedPredicate.ParamRef("expected"), inner.value());
+    }
+
+    public void testGuardedNotEqualOnNumericLiteralEmitsNotRangeEq() {
+        ExtractedPredicate.Not not = (ExtractedPredicate.Not) extract(
+            "doc['price'].size() == 1 && doc['price'].value != 10"
+        );
+        assertNotNull(not);
+        ExtractedPredicate.Range inner = (ExtractedPredicate.Range) not.inner();
+        assertEquals("price", inner.field());
+        assertEquals(Long.valueOf(10L), inner.lower());
+        assertEquals(Long.valueOf(10L), inner.upper());
+        assertTrue(inner.includeLower());
+        assertTrue(inner.includeUpper());
+    }
+
+    public void testGuardedNotListContainsEmitsNotTerms() {
+        ExtractedPredicate.Not not = (ExtractedPredicate.Not) extract(
+            "doc['status'].size() == 1 && !['active', 'pending'].contains(doc['status'].value)"
+        );
+        assertNotNull(not);
+        ExtractedPredicate.Terms inner = (ExtractedPredicate.Terms) not.inner();
+        assertEquals("status", inner.field());
+        assertEquals(java.util.Arrays.asList("active", "pending"), inner.values());
+    }
+
+    public void testGuardedNotWholeListParamContainsEmitsNotTerms() {
+        ExtractedPredicate.Not not = (ExtractedPredicate.Not) extract(
+            "doc['status'].size() == 1 && !params.statusList.contains(doc['status'].value)"
+        );
+        assertNotNull(not);
+        ExtractedPredicate.Terms inner = (ExtractedPredicate.Terms) not.inner();
+        assertEquals("status", inner.field());
+        assertEquals(new ExtractedPredicate.ParamRef("statusList"), inner.listParam());
+    }
+
+    public void testDeclineUnguardedNotEqual() {
+        assertNull(extract("doc['status'].value != 'active'"));
+    }
+
+    public void testDeclineUnguardedNotListContains() {
+        assertNull(extract("!['active'].contains(doc['status'].value)"));
+    }
+
+    public void testDeclineNotEqualOnDifferentField() {
+        assertNull(extract("doc['status'].size() == 1 && doc['tier'].value != 'gold'"));
+    }
+
+    public void testGuardedNotEqualWithParamEmitsNotTermParam() {
+        // `value != params.x` extracts as Not(Term(ParamRef)). The phase can't tell whether the
+        // param will resolve to a String or a Number at runtime; the Term carrier's String-only
+        // gate decides. That's the same way the positive `== params.x` path handles it: emit,
+        // then let the carrier's runtime gate either resolve or decline.
+        ExtractedPredicate.Not not = (ExtractedPredicate.Not) extract(
+            "doc['price'].size() == 1 && doc['price'].value != params.threshold"
+        );
+        assertNotNull(not);
+        ExtractedPredicate.Term inner = (ExtractedPredicate.Term) not.inner();
+        assertEquals("price", inner.field());
+        assertEquals(new ExtractedPredicate.ParamRef("threshold"), inner.value());
+    }
+
+    public void testDeclineNotListContainsWithNonStringElement() {
+        // Same element-type decline as the positive Terms path: a numeric element would
+        // stringify through BytesRefs.toBytesRef and silently over-match.
+        assertNull(extract(
+            "doc['status'].size() == 1 && !['active', 1].contains(doc['status'].value)"
         ));
     }
 }
