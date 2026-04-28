@@ -452,41 +452,61 @@ public final class PredicateExtractionPhase extends UserTreeBaseVisitor<ScriptSc
     }
 
     /**
-     * Match a guarded set-membership call: {@code ['literal', 'literal', ...].contains(
-     * doc['f'].value)}. Returns an {@link ExtractedPredicate.Terms} when the list is a
-     * homogeneous sequence of {@link EString} literals (possibly empty) and the argument is a
-     * field reference on the guarded field. Declines anything else — variables inside the list,
-     * mixed-type elements, non-contains methods, missing list prefix, or a different field in
-     * the argument all fall through and let the script run.
+     * Match a guarded set-membership call: {@code ['literal', params.x, ...].contains(
+     * doc['f'].value)} or {@code params.listName.contains(doc['f'].value)}. Returns an
+     * {@link ExtractedPredicate.Terms} when the prefix is either an inline list whose elements
+     * are {@link EString} literals or {@code params.<name>} references, or a whole-list
+     * {@code params.<name>} reference. The argument must be a field reference on the guarded
+     * field. Declines anything else — arithmetic inside the list, non-String literals ({@code 1},
+     * {@code true}), {@code doc[...]} reads as elements, non-contains methods, a non-list
+     * non-params prefix, or a different field in the argument all fall through and let the
+     * script run.
      *
      * <p>Empty lists emit {@code Terms(field, [])}, which the carrier hands to
      * {@code MappedFieldType.termsQuery(emptyList)} — that produces a boolean query with zero
      * SHOULD clauses, i.e. match-nothing. Semantically identical to Painless'
      * {@code [].contains(x)} which is always {@code false}.
+     *
+     * <p>{@link ExtractedPredicate.ParamRef} elements (and whole-list ParamRefs whose runtime
+     * value is a list) are resolved at query-build time through {@code Terms.toQuery}'s
+     * per-element String-only gate, so a {@code params.x} that resolves to a non-String declines
+     * the whole rewrite (same rule as {@link ExtractedPredicate.Term}).
      */
     private static ExtractedPredicate.Terms tryExtractTerms(ECall call, String guardedField) {
         if ("contains".equals(call.getMethodName()) == false) return null;
         if (call.getArgumentNodes().size() != 1) return null;
-        if ((call.getPrefixNode() instanceof EListInit) == false) return null;
-        EListInit listInit = (EListInit) call.getPrefixNode();
         String argField = extractDocField(call.getArgumentNodes().get(0));
         if (argField == null || argField.equals(guardedField) == false) {
             return null;
         }
-        List<Object> values = new ArrayList<>(listInit.getValueNodes().size());
-        for (AExpression element : listInit.getValueNodes()) {
-            if ((element instanceof EString) == false) {
-                // Non-literal (ESymbol, EDot, ParamRef) or non-String (ENumeric, EBoolean) would
-                // change semantics: Painless walks the list with `.equals()` against the raw
-                // element object, whereas `termsQuery` does a bit-exact lookup of the indexed
-                // keyword. A numeric element like `1` would be stringified ("1") before lookup
-                // and match a doc whose keyword is literally "1" — strictly more permissive
-                // than the script. Decline.
-                return null;
+        AExpression prefix = call.getPrefixNode();
+        if (prefix instanceof EListInit) {
+            EListInit listInit = (EListInit) prefix;
+            List<Object> values = new ArrayList<>(listInit.getValueNodes().size());
+            for (AExpression element : listInit.getValueNodes()) {
+                Object captured = extractStringOrParamRef(element);
+                if (captured == null) {
+                    // Non-String literal (ENumeric, EBoolean), arithmetic, or non-params variable
+                    // reference would change semantics: Painless walks the list with `.equals()`
+                    // against the raw element object, whereas `termsQuery` does a bit-exact
+                    // lookup of the indexed keyword. A numeric element like `1` would be
+                    // stringified ("1") before lookup and match a doc whose keyword is literally
+                    // "1" — strictly more permissive than the script. Decline.
+                    return null;
+                }
+                values.add(captured);
             }
-            values.add(((EString) element).getString());
+            return new ExtractedPredicate.Terms(argField, values);
         }
-        return new ExtractedPredicate.Terms(argField, values);
+        ExtractedPredicate.ParamRef listParamRef = extractParamRef(prefix);
+        if (listParamRef != null) {
+            // Whole-list shape: the list itself is `params.<name>`. Terms.toQuery resolves this
+            // at query-build time and walks each element through the same String-only gate as
+            // the inline shape; a non-List or any non-String element declines the rewrite so the
+            // script runs.
+            return new ExtractedPredicate.Terms(argField, listParamRef);
+        }
+        return null;
     }
 
     /**

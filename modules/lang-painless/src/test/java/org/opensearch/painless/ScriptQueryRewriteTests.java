@@ -193,6 +193,113 @@ public class ScriptQueryRewriteTests extends OpenSearchSingleNodeTestCase {
         );
     }
 
+    public void testGuardedListContainsWithParamElementRewritesToTerms() throws IOException {
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("extra", "pending");
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(
+                ScriptType.INLINE,
+                "painless",
+                "doc['status'].size() == 1 && ['active', params.extra].contains(doc['status'].value)",
+                params
+            )
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("list.contains with param element must rewrite, got " + query, query instanceof ConstantScoreQuery);
+        Query inner = ((ConstantScoreQuery) query).getQuery();
+        assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
+    }
+
+    public void testGuardedListContainsWithNumericParamElementFallsBackToScript() throws IOException {
+        // Same String-only rule as the Term carrier: a Number-valued element would stringify via
+        // BytesRefs.toBytesRef and match a doc whose keyword equals that stringification,
+        // strictly more permissive than Painless' `.equals()` on the raw value.
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("extra", 123);
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(
+                ScriptType.INLINE,
+                "painless",
+                "doc['status'].size() == 1 && ['active', params.extra].contains(doc['status'].value)",
+                params
+            )
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("Number-valued terms element must stay on ScriptQuery, got " + query, isScriptQuery(query));
+    }
+
+    public void testGuardedWholeListParamContainsRewritesToTerms() throws IOException {
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("statusList", java.util.Arrays.asList("active", "pending"));
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(
+                ScriptType.INLINE,
+                "painless",
+                "doc['status'].size() == 1 && params.statusList.contains(doc['status'].value)",
+                params
+            )
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("whole-list-param script must rewrite, got " + query, query instanceof ConstantScoreQuery);
+        Query inner = ((ConstantScoreQuery) query).getQuery();
+        assertFalse("rewrite must not fall back to ScriptQuery, got " + inner, isScriptQuery(inner));
+    }
+
+    public void testWholeListParamWithNonListValueFallsBackToScript() throws IOException {
+        // Param resolves to a String instead of a List — Painless would ClassCastException on
+        // `.contains` dispatch. Rewrite must decline so the script runs and surfaces the error.
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("statusList", "active");
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(
+                ScriptType.INLINE,
+                "painless",
+                "doc['status'].size() == 1 && params.statusList.contains(doc['status'].value)",
+                params
+            )
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("non-List-valued whole-list param must stay on ScriptQuery, got " + query, isScriptQuery(query));
+    }
+
+    public void testWholeListParamWithNonStringElementFallsBackToScript() throws IOException {
+        // List contains a numeric element. Painless walks with `.equals()` on the raw number
+        // against the keyword String — always false. Rewrite would stringify and over-match.
+        // Decline.
+        IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "status", "type=keyword");
+        QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);
+
+        Map<String, Object> params = new HashMap<>();
+        params.put("statusList", java.util.Arrays.asList("active", 123));
+        ScriptQueryBuilder builder = new ScriptQueryBuilder(
+            new Script(
+                ScriptType.INLINE,
+                "painless",
+                "doc['status'].size() == 1 && params.statusList.contains(doc['status'].value)",
+                params
+            )
+        );
+
+        Query query = builder.toQuery(context);
+        assertTrue("mixed-type list must stay on ScriptQuery, got " + query, isScriptQuery(query));
+    }
+
     public void testGuardedOrRewritesToBooleanShould() throws IOException {
         IndexService index = createIndexWithSimpleMappings("idx", REWRITE_ENABLED, "price", "type=long");
         QueryShardContext context = index.newQueryShardContext(0, null, () -> 0, null);

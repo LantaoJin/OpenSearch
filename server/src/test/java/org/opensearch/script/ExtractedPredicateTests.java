@@ -406,6 +406,28 @@ public class ExtractedPredicateTests extends OpenSearchTestCase {
         assertSame(expected, predicate.toQuery(context, Collections.singletonMap("second", "pending")));
     }
 
+    public void testTermsResolvesAllParamRefElements() {
+        // All-ParamRef list: the phase emits this shape from `[params.a, params.b].contains(...)`.
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        Query expected = new MatchAllDocsQuery();
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+        java.util.List<Object> resolvedExpected = java.util.Arrays.asList("active", "pending");
+        doReturn(expected).when(fieldType).termsQuery(resolvedExpected, context);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Terms(
+            "status",
+            java.util.Arrays.asList(
+                new ExtractedPredicate.ParamRef("first"),
+                new ExtractedPredicate.ParamRef("second")
+            )
+        );
+        java.util.Map<String, Object> params = new java.util.HashMap<>();
+        params.put("first", "active");
+        params.put("second", "pending");
+        assertSame(expected, predicate.toQuery(context, params));
+    }
+
     public void testTermsDeclinesWhenAnyElementIsNonString() {
         QueryShardContext context = mock(QueryShardContext.class);
         KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
@@ -436,15 +458,107 @@ public class ExtractedPredicateTests extends OpenSearchTestCase {
         verify(fieldType, org.mockito.Mockito.never()).termsQuery(any(), any());
     }
 
+    public void testTermsWholeListParamResolvesToStringList() {
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        Query expected = new MatchAllDocsQuery();
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+        java.util.List<Object> resolvedExpected = java.util.Arrays.asList("active", "pending");
+        doReturn(expected).when(fieldType).termsQuery(resolvedExpected, context);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Terms(
+            "status",
+            new ExtractedPredicate.ParamRef("statusList")
+        );
+        java.util.Map<String, Object> params = Collections.singletonMap(
+            "statusList",
+            java.util.Arrays.asList("active", "pending")
+        );
+        assertSame(expected, predicate.toQuery(context, params));
+    }
+
+    public void testTermsWholeListParamEmptyListResolvesToMatchNothing() {
+        // Empty list: Painless `[].contains(x)` is always false. MappedFieldType.termsQuery on
+        // an empty list produces a zero-SHOULD BooleanQuery — match-nothing. Equivalent.
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        Query expected = new MatchAllDocsQuery();
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+        doReturn(expected).when(fieldType).termsQuery(Collections.emptyList(), context);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Terms(
+            "status",
+            new ExtractedPredicate.ParamRef("statusList")
+        );
+        assertSame(expected, predicate.toQuery(context, Collections.singletonMap("statusList", Collections.emptyList())));
+    }
+
+    public void testTermsWholeListParamDeclinesWhenMissing() {
+        // Missing param: Painless would NPE on `null.contains(...)`. Decline so the script runs
+        // and surfaces the NPE rather than silently match-nothing.
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Terms(
+            "status",
+            new ExtractedPredicate.ParamRef("statusList")
+        );
+        assertNull(predicate.toQuery(context, Collections.emptyMap()));
+        verify(fieldType, org.mockito.Mockito.never()).termsQuery(any(), any());
+    }
+
+    public void testTermsWholeListParamDeclinesWhenNotAList() {
+        // Non-List param (String, Number): Painless would ClassCastException on `.contains`
+        // dispatch against a non-Collection. Decline so the script runs.
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Terms(
+            "status",
+            new ExtractedPredicate.ParamRef("statusList")
+        );
+        assertNull(predicate.toQuery(context, Collections.singletonMap("statusList", "active")));
+        assertNull(predicate.toQuery(context, Collections.singletonMap("statusList", 42)));
+        verify(fieldType, org.mockito.Mockito.never()).termsQuery(any(), any());
+    }
+
+    public void testTermsWholeListParamDeclinesWhenAnyElementNonString() {
+        // Per-element gate: a Number or Boolean inside the resolved list would stringify via
+        // BytesRefs.toBytesRef and match a keyword whose value equals that stringification.
+        // Decline the whole rewrite.
+        QueryShardContext context = mock(QueryShardContext.class);
+        KeywordFieldMapper.KeywordFieldType fieldType = spy(new KeywordFieldMapper.KeywordFieldType("status"));
+        when(context.fieldMapper("status")).thenReturn(fieldType);
+
+        ExtractedPredicate predicate = new ExtractedPredicate.Terms(
+            "status",
+            new ExtractedPredicate.ParamRef("statusList")
+        );
+        assertNull(predicate.toQuery(context, Collections.singletonMap("statusList", java.util.Arrays.asList("active", 1))));
+        assertNull(predicate.toQuery(context, Collections.singletonMap("statusList", java.util.Arrays.asList(Boolean.TRUE))));
+        verify(fieldType, org.mockito.Mockito.never()).termsQuery(any(), any());
+    }
+
     public void testTermsEqualsAndHashCode() {
         ExtractedPredicate.Terms a = new ExtractedPredicate.Terms("status", java.util.Arrays.asList("active", "pending"));
         ExtractedPredicate.Terms b = new ExtractedPredicate.Terms("status", java.util.Arrays.asList("active", "pending"));
         ExtractedPredicate.Terms c = new ExtractedPredicate.Terms("status", java.util.Arrays.asList("active"));
         ExtractedPredicate.Terms d = new ExtractedPredicate.Terms("tier", java.util.Arrays.asList("active", "pending"));
+        ExtractedPredicate.Terms e = new ExtractedPredicate.Terms("status", new ExtractedPredicate.ParamRef("x"));
+        ExtractedPredicate.Terms f = new ExtractedPredicate.Terms("status", new ExtractedPredicate.ParamRef("x"));
+        ExtractedPredicate.Terms g = new ExtractedPredicate.Terms("status", new ExtractedPredicate.ParamRef("y"));
         assertEquals(a, b);
         assertEquals(a.hashCode(), b.hashCode());
         assertNotEquals(a, c);
         assertNotEquals(a, d);
+        // Inline-list carrier is not equal to a whole-list-param carrier on the same field.
+        assertNotEquals(a, e);
+        // Two whole-list-param carriers with the same ParamRef are equal.
+        assertEquals(e, f);
+        assertEquals(e.hashCode(), f.hashCode());
+        assertNotEquals(e, g);
     }
 
     public void testOrUnionsClauses() {

@@ -182,6 +182,44 @@ public class RewriteEquivalenceTests extends OpenSearchSingleNodeTestCase {
         );
     }
 
+    public void testTermsMixedLiteralAndParamElement() {
+        Map<String, Object> params = new HashMap<>();
+        params.put("extra", "pending");
+        assertEquivalent(
+            "doc['status'].size() == 1 && ['active', params.extra].contains(doc['status'].value)",
+            params
+        );
+    }
+
+    public void testTermsAllParamElements() {
+        Map<String, Object> params = new HashMap<>();
+        params.put("a", "active");
+        params.put("b", "archived");
+        assertEquivalent(
+            "doc['status'].size() == 1 && [params.a, params.b].contains(doc['status'].value)",
+            params
+        );
+    }
+
+    public void testTermsWholeListParam() {
+        Map<String, Object> params = new HashMap<>();
+        params.put("statusList", java.util.Arrays.asList("active", "pending"));
+        assertEquivalent(
+            "doc['status'].size() == 1 && params.statusList.contains(doc['status'].value)",
+            params
+        );
+    }
+
+    public void testTermsWholeListParamEmpty() {
+        // Empty list: `[].contains(x)` is always false in Painless; rewritten to match-nothing.
+        Map<String, Object> params = new HashMap<>();
+        params.put("statusList", Collections.emptyList());
+        assertEquivalent(
+            "doc['status'].size() == 1 && params.statusList.contains(doc['status'].value)",
+            params
+        );
+    }
+
     // --- Or ----------------------------------------------------------------
 
     public void testOrTwoNumericRanges() {

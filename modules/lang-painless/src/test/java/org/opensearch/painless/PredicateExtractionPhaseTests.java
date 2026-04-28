@@ -448,11 +448,89 @@ public class PredicateExtractionPhaseTests extends ScriptTestCase {
         assertEquals(java.util.Arrays.asList("active"), t.values());
     }
 
+    public void testGuardedListContainsWithMixedLiteralAndParamRef() {
+        // Mixed literal + params.x is safe: literal elements pass through as Strings, and
+        // params.x resolves at query-build time through Terms.toQuery's String-only gate.
+        ExtractedPredicate.Terms t = (ExtractedPredicate.Terms) extract(
+            "doc['status'].size() == 1 && ['active', params.extra].contains(doc['status'].value)"
+        );
+        assertNotNull(t);
+        assertEquals("status", t.field());
+        assertEquals(2, t.values().size());
+        assertEquals("active", t.values().get(0));
+        assertEquals(new ExtractedPredicate.ParamRef("extra"), t.values().get(1));
+    }
+
+    public void testGuardedListContainsWithAllParamRefElements() {
+        ExtractedPredicate.Terms t = (ExtractedPredicate.Terms) extract(
+            "doc['status'].size() == 1 && [params.a, params.b].contains(doc['status'].value)"
+        );
+        assertNotNull(t);
+        assertEquals(java.util.Arrays.asList(
+            new ExtractedPredicate.ParamRef("a"),
+            new ExtractedPredicate.ParamRef("b")
+        ), t.values());
+    }
+
+    public void testGuardedWholeListParamContains() {
+        // `params.statusList.contains(doc['f'].value)` — the list itself is a param. Carrier
+        // resolves it at query-build time; phase just captures the ParamRef.
+        ExtractedPredicate.Terms t = (ExtractedPredicate.Terms) extract(
+            "doc['status'].size() == 1 && params.statusList.contains(doc['status'].value)"
+        );
+        assertNotNull(t);
+        assertEquals("status", t.field());
+        assertNull(t.values());
+        assertEquals(new ExtractedPredicate.ParamRef("statusList"), t.listParam());
+    }
+
+    public void testGuardedWholeListParamContainsAltSpelling() {
+        // Alt-spelling argument: `doc.get('f').value` resolves to the same canonical field.
+        ExtractedPredicate.Terms t = (ExtractedPredicate.Terms) extract(
+            "doc['status'].size() == 1 && params.whitelist.contains(doc.get('status').value)"
+        );
+        assertNotNull(t);
+        assertEquals("status", t.field());
+        assertEquals(new ExtractedPredicate.ParamRef("whitelist"), t.listParam());
+    }
+
+    public void testDeclineWholeListParamContainsOnDifferentField() {
+        assertNull(extract("doc['status'].size() == 1 && params.tierList.contains(doc['tier'].value)"));
+    }
+
+    public void testDeclineUnguardedWholeListParamContains() {
+        assertNull(extract("params.statusList.contains(doc['status'].value)"));
+    }
+
+    public void testDeclineWholeListParamContainsWithNestedAccess() {
+        // `params.a.b` is EDot(EDot(ESymbol('params'), 'a'), 'b') — extractParamRef rejects this.
+        assertNull(extract("doc['status'].size() == 1 && params.a.b.contains(doc['status'].value)"));
+    }
+
     public void testDeclineListContainsWithNonStringElement() {
         // Numeric element: Painless walks the list with `1.equals(docValue)`, always false for a
         // String docValue. Rewrite would stringify to "1" and match a doc with keyword "1" —
         // silently more permissive. Decline.
         assertNull(extract("doc['status'].size() == 1 && ['active', 1].contains(doc['status'].value)"));
+    }
+
+    public void testDeclineListContainsWithBooleanElement() {
+        // Boolean element would stringify to "true"/"false" via BytesRefs.toBytesRef and match a
+        // keyword literally equal to that string, strictly more permissive than Painless.
+        assertNull(extract("doc['status'].size() == 1 && ['active', true].contains(doc['status'].value)"));
+    }
+
+    public void testDeclineListContainsWithNestedParamsAccess() {
+        // `params.a.b` is an EDot whose prefix is another EDot, not `ESymbol('params')`.
+        // extractParamRef rejects it, so the element is neither a String literal nor a ParamRef
+        // and the whole rewrite declines.
+        assertNull(extract("doc['status'].size() == 1 && [params.a.b].contains(doc['status'].value)"));
+    }
+
+    public void testDeclineListContainsWithDocFieldElement() {
+        // `doc['x'].value` inside the list — reading a field from every doc during compile-time
+        // folding isn't something we can express as a static Terms carrier. Decline.
+        assertNull(extract("doc['status'].size() == 1 && [doc['other'].value].contains(doc['status'].value)"));
     }
 
     public void testDeclineListContainsWithNonLiteralElement() {

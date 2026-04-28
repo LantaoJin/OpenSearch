@@ -378,32 +378,72 @@ public abstract class ExtractedPredicate {
 
     /**
      * A set-membership predicate on one field, produced from shapes like
-     * {@code doc['status'].size() == 1 && ['active','pending'].contains(doc['status'].value)}.
-     * Values are typed as {@link Object} to match the {@link Term} carrier's shape; for this PR
-     * the phase only emits homogeneous lists of {@link String} literals, which {@link
-     * MappedFieldType#termsQuery} converts to {@code BytesRef}s via the same
-     * {@code BytesRefs.toBytesRef} path {@link Term#toQuery} relies on.
+     * {@code doc['status'].size() == 1 && ['active', params.extra].contains(doc['status'].value)}
+     * or {@code doc['status'].size() == 1 && params.statusList.contains(doc['status'].value)}.
+     * Two element sources are supported:
+     * <ul>
+     *   <li><b>Inline element list</b>: each element is either a {@link String} literal or a
+     *       {@link ParamRef} placeholder for {@code params.<name>}. Emitted when the list literal
+     *       appears inline in the script.</li>
+     *   <li><b>Whole-list ParamRef</b>: a single {@link ParamRef} that resolves at query-build
+     *       time to a {@code List<?>} whose every element must be a {@link String}. Emitted when
+     *       the list itself is passed as {@code params.listName}.</li>
+     * </ul>
+     * In both cases {@link MappedFieldType#termsQuery} converts the resolved values to
+     * {@code BytesRef}s via the same {@code BytesRefs.toBytesRef} path {@link Term#toQuery}
+     * relies on.
      *
      * <p>Applies the same two-part field-type gate as {@link Term}: only plain
      * {@link KeywordFieldMapper.KeywordFieldType} without a configured normalizer is accepted,
      * because normalized/analyzed fields would apply analysis to each list element and match a
      * different document set than Painless' raw-bytes {@code .equals()}.
+     *
+     * <p>{@link ParamRef} elements (or a whole-list ParamRef whose resolved list contains one)
+     * are resolved at query-build time through the same String-only rule as {@link Term}: any
+     * element that resolves to a {@code Number}, {@code Boolean}, {@code null}, or any other
+     * non-{@code String} declines the whole rewrite so the script runs and mirrors Painless'
+     * {@code .equals()} semantics on the raw element.
      */
     public static final class Terms extends ExtractedPredicate {
         private final String field;
         private final List<Object> values;
+        private final ParamRef listParam;
 
         public Terms(String field, List<Object> values) {
             this.field = Objects.requireNonNull(field, "field");
             this.values = Collections.unmodifiableList(Objects.requireNonNull(values, "values"));
+            this.listParam = null;
+        }
+
+        /**
+         * Whole-list-ParamRef constructor: the list itself is a {@code params.<name>} reference.
+         * At query-build time the ParamRef resolves to a {@code List<?>} and each element is
+         * validated through the same String-only rule as {@link Term}.
+         */
+        public Terms(String field, ParamRef listParam) {
+            this.field = Objects.requireNonNull(field, "field");
+            this.listParam = Objects.requireNonNull(listParam, "listParam");
+            this.values = null;
         }
 
         public String field() {
             return field;
         }
 
+        /**
+         * Element list for the inline-list shape. Returns {@code null} when the carrier was built
+         * with the whole-list-ParamRef constructor.
+         */
         public List<Object> values() {
             return values;
+        }
+
+        /**
+         * ParamRef for the whole-list shape. Returns {@code null} when the carrier was built with
+         * an inline element list.
+         */
+        public ParamRef listParam() {
+            return listParam;
         }
 
         @Override
@@ -423,6 +463,20 @@ public abstract class ExtractedPredicate {
             if (fieldType.getTextSearchInfo().getSearchAnalyzer() != Lucene.KEYWORD_ANALYZER) {
                 return null;
             }
+            List<Object> source;
+            if (listParam != null) {
+                // Whole-list ParamRef: resolve it to a concrete List now. Missing (null) declines
+                // to mirror Painless' NPE on `null.contains(...)`; a non-List declines because
+                // Painless would throw ClassCastException on `.contains` dispatch against a
+                // non-Collection. Declining lets the script run so the user sees the same error.
+                Object resolved = params.get(listParam.name());
+                if ((resolved instanceof List) == false) {
+                    return null;
+                }
+                source = new ArrayList<>((List<?>) resolved);
+            } else {
+                source = values;
+            }
             // Per-element validation applies the same String-only rule as Term. The public
             // constructor takes raw {@code Object} elements, so a future phase change or a
             // third-party factory could hand us a list with a numeric, Boolean, or ParamRef
@@ -430,8 +484,8 @@ public abstract class ExtractedPredicate {
             // equals that stringification. Resolve each element through the Term path and
             // decline the whole rewrite if any element fails — partial lookup would be wrong
             // because `List.contains` requires exact element matches, not some-of-matches.
-            List<Object> resolved = new ArrayList<>(values.size());
-            for (Object element : values) {
+            List<Object> resolved = new ArrayList<>(source.size());
+            for (Object element : source) {
                 Object r = resolveTermValue(element, params);
                 if (r == UNRESOLVABLE) {
                     return null;
@@ -450,17 +504,17 @@ public abstract class ExtractedPredicate {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
             Terms t = (Terms) o;
-            return field.equals(t.field) && values.equals(t.values);
+            return field.equals(t.field) && Objects.equals(values, t.values) && Objects.equals(listParam, t.listParam);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(field, values);
+            return Objects.hash(field, values, listParam);
         }
 
         @Override
         public String toString() {
-            return "Terms{field='" + field + "', values=" + values + '}';
+            return "Terms{field='" + field + "', values=" + (listParam != null ? listParam : values) + '}';
         }
     }
 
