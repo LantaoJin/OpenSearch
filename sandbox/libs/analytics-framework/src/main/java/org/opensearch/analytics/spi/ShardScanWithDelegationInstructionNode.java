@@ -27,6 +27,11 @@ public class ShardScanWithDelegationInstructionNode extends ShardScanInstruction
     private final int delegatedPredicateCount;
 
     public ShardScanWithDelegationInstructionNode(FilterTreeShape treeShape, int delegatedPredicateCount) {
+        this(null, treeShape, delegatedPredicateCount);
+    }
+
+    public ShardScanWithDelegationInstructionNode(String logicalTableName, FilterTreeShape treeShape, int delegatedPredicateCount) {
+        super(logicalTableName);
         this.treeShape = treeShape;
         this.delegatedPredicateCount = delegatedPredicateCount;
     }

@@ -129,12 +129,17 @@ public class FragmentConversionDriver {
         LinkedList<InstructionNode> instructions = new LinkedList<>();
         RelNode leaf = findLeaf(plan.resolvedFragment());
 
-        if (leaf instanceof OpenSearchTableScan) {
+        if (leaf instanceof OpenSearchTableScan scan) {
+            // The leaf's qualified name is the planner's logical table name (alias / index pattern /
+            // index) — the same single segment isthmus emits as the Substrait NamedTable. Pass it to
+            // the data node so it registers the scanned shard's table under this name, instead of the
+            // backend reverse-engineering it from the plan bytes.
+            String logicalTableName = scan.getTable().getQualifiedName().getLast();
             List<DelegatedExpression> delegated = delegationBytes.getResult();
             if (!delegated.isEmpty()) {
-                factory.createShardScanWithDelegationNode(treeShape, delegated.size()).ifPresent(instructions::add);
+                factory.createShardScanWithDelegationNode(logicalTableName, treeShape, delegated.size()).ifPresent(instructions::add);
             } else {
-                factory.createShardScanNode().ifPresent(instructions::add);
+                factory.createShardScanNode(logicalTableName).ifPresent(instructions::add);
             }
         }
         return instructions;

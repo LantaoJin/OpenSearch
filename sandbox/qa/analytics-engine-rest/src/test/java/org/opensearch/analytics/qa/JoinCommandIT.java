@@ -38,6 +38,15 @@ import java.util.Map;
  * exploratory coverage — the IT focuses on whether each command plans, converts
  * to Substrait, and executes end-to-end rather than on exact row values.
  *
+ * <p>Every test runs the same query twice — once with
+ * {@code analytics.mpp.enabled=false} (kill switch on; broadcast and hash-shuffle
+ * split rules are skipped, every join routes through coordinator-centric) and
+ * once with {@code analytics.mpp.enabled=true} (CBO is free to pick BROADCAST or
+ * HASH_SHUFFLE, though the small calcs dataset and aggregated probes typically
+ * keep CBO on coord-centric anyway). The same expected count is asserted under
+ * both modes — that guards both code paths against regressions on these shapes
+ * regardless of whether MPP fires.
+ *
  * <p>All join / lookup tests pass end-to-end. {@code testAppendcol} is
  * {@code @AwaitsFix} — see task #113.
  */
@@ -46,7 +55,23 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
     private static final Dataset CALCS = new Dataset("calcs", "calcs");
     private static final Dataset CALCS_ALT = new Dataset("calcs", "calcs_alt");
 
+    /**
+     * Override the calcs mapping's default {@code number_of_shards: 1} so the broadcast
+     * and hash-shuffle split rules are eligible to fire under {@code mpp.enabled=true}.
+     * Both rules require multi-shard SHARD scans on both sides; single-shard data
+     * collapses CBO to the COORD-singleton alternative and the {@code mpp.enabled}
+     * toggle has no effect on the physical plan.
+     */
+    private static final int SHARDS = 3;
+
     private static boolean dataProvisioned = false;
+
+    @Override
+    public void tearDown() throws Exception {
+        // Reset the MPP gate after every test so a failure can't leak state into the next.
+        resetSetting("analytics.mpp.enabled");
+        super.tearDown();
+    }
 
     /**
      * Lazily provision both calcs indices on first invocation. Called inside test
@@ -54,8 +79,8 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
      */
     private void ensureDataProvisioned() throws IOException {
         if (dataProvisioned == false) {
-            DatasetProvisioner.provision(client(), CALCS);
-            DatasetProvisioner.provision(client(), CALCS_ALT);
+            DatasetProvisioner.provision(client(), CALCS, SHARDS);
+            DatasetProvisioner.provision(client(), CALCS_ALT, SHARDS);
             dataProvisioned = true;
         }
     }
@@ -76,7 +101,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             + CALCS_ALT.indexName
             + " | stats count() as right_cnt by str0 ]"
             + " | stats count() as cnt";
-        assertSingleCount(ppl, 3L);
+        assertSingleCountBothMppModes(ppl, 3L);
     }
 
     /**
@@ -92,7 +117,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             + CALCS_ALT.indexName
             + " | where str0 = 'TECHNOLOGY' | fields key, str0 ]"
             + " | stats count() as cnt";
-        assertSingleCount(ppl, 89L);
+        assertSingleCountBothMppModes(ppl, 89L);
     }
 
     /**
@@ -108,7 +133,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             + CALCS_ALT.indexName
             + " | fields key, str0 ]"
             + " | stats count() as cnt";
-        assertRowCountPositive(ppl);
+        assertRowCountPositiveBothMppModes(ppl);
     }
 
     /** Left semi join — returns left rows that have at least one match on the right. */
@@ -121,7 +146,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             + CALCS_ALT.indexName
             + " | fields key, str0 ]"
             + " | stats count() as cnt";
-        assertRowCountPositive(ppl);
+        assertRowCountPositiveBothMppModes(ppl);
     }
 
     /** Left anti join — returns left rows with NO match on the right. */
@@ -134,7 +159,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             + CALCS_ALT.indexName
             + " | where str0 = 'TECHNOLOGY' | fields key, str0 ]"
             + " | stats count() as cnt";
-        assertRowCountPositive(ppl);
+        assertRowCountPositiveBothMppModes(ppl);
     }
 
     /**
@@ -151,7 +176,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             + CALCS_ALT.indexName
             + " | fields key ]"
             + " | stats count() as cnt";
-        assertSingleCount(ppl, 289L);
+        assertSingleCountBothMppModes(ppl, 289L);
     }
 
     // ── lookup (LogicalJoin LEFT) ──────────────────────────────────────────────
@@ -169,7 +194,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             + CALCS_ALT.indexName
             + " key REPLACE str0"
             + " | stats count() as cnt";
-        assertSingleCount(ppl, 17L);
+        assertSingleCountBothMppModes(ppl, 17L);
     }
 
     /**
@@ -185,7 +210,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             + CALCS_ALT.indexName
             + " key REPLACE str0 AS str2"
             + " | stats count() as cnt";
-        assertSingleCount(ppl, 17L);
+        assertSingleCountBothMppModes(ppl, 17L);
     }
 
     // ── appendcol (LogicalJoin FULL OUTER by row_num) ──────────────────────────
@@ -207,7 +232,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             + " | stats count() as total by str0 | sort str0"
             + " | appendcol [ stats count() as alt_total ]"
             + " | stats count() as cnt";
-        assertSingleCount(ppl, 3L);
+        assertSingleCountBothMppModes(ppl, 3L);
     }
 
     // ── Combinations: matches the structural UTs in PlanShapeTests ──────────────
@@ -227,7 +252,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             + " | stats count() as cnt by str0"
             + " | stats count() as cnt";
         // 3 distinct str0 values after grouping.
-        assertSingleCount(ppl, 3L);
+        assertSingleCountBothMppModes(ppl, 3L);
     }
 
     /**
@@ -243,7 +268,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             + " [ source=" + CALCS_ALT.indexName + " | stats count() as right_cnt by str0 ]"
             + " | sort str0"
             + " | stats count() as cnt";
-        assertSingleCount(ppl, 3L);
+        assertSingleCountBothMppModes(ppl, 3L);
     }
 
     /**
@@ -262,10 +287,36 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             + " [ source=" + CALCS.indexName + " | stats count() as cnt_c by str0 ]"
             + " | stats count() as cnt";
         // All 3 chained joins on str0 — each side groups to 3 rows, equi-join yields 3.
-        assertSingleCount(ppl, 3L);
+        assertSingleCountBothMppModes(ppl, 3L);
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────
+
+    /**
+     * Run the PPL twice — once with {@code analytics.mpp.enabled=false} (force
+     * coordinator-centric) and once with {@code true} (let CBO pick) — asserting
+     * the same expected single-row count under both modes.
+     */
+    private void assertSingleCountBothMppModes(String ppl, long expected) throws IOException {
+        ensureDataProvisioned();
+        applySetting("analytics.mpp.enabled", "false");
+        assertSingleCount(ppl, expected, "mpp.enabled=false");
+        applySetting("analytics.mpp.enabled", "true");
+        assertSingleCount(ppl, expected, "mpp.enabled=true");
+    }
+
+    /**
+     * Run the PPL twice — once with each {@code analytics.mpp.enabled} value —
+     * asserting a single non-negative count row under both modes. Used where the
+     * exact row count over the calcs dataset isn't pinned (right/semi/anti).
+     */
+    private void assertRowCountPositiveBothMppModes(String ppl) throws IOException {
+        ensureDataProvisioned();
+        applySetting("analytics.mpp.enabled", "false");
+        assertRowCountPositive(ppl, "mpp.enabled=false");
+        applySetting("analytics.mpp.enabled", "true");
+        assertRowCountPositive(ppl, "mpp.enabled=true");
+    }
 
     /**
      * Execute a PPL query expected to return a single {@code cnt} row and assert the count
@@ -273,45 +324,57 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
      * aren't pinned (right/semi/anti over the calcs dataset) but end-to-end execution
      * through planner + substrait + DataFusion is what's being exercised.
      */
-    private void assertRowCountPositive(String ppl) throws IOException {
+    private void assertRowCountPositive(String ppl, String mode) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) response.get("rows");
-        assertNotNull("Response missing 'rows' for query: " + ppl, rows);
-        assertEquals("Expected single count row for query: " + ppl, 1, rows.size());
+        assertNotNull("[" + mode + "] Response missing 'rows' for query: " + ppl, rows);
+        assertEquals("[" + mode + "] Expected single count row for query: " + ppl, 1, rows.size());
         Object actual = rows.get(0).get(0);
         assertTrue(
-            "Expected numeric count for query: " + ppl + " but got: " + actual,
+            "[" + mode + "] Expected numeric count for query: " + ppl + " but got: " + actual,
             actual instanceof Number
         );
         assertTrue(
-            "Expected non-negative count for query: " + ppl + " but got: " + actual,
+            "[" + mode + "] Expected non-negative count for query: " + ppl + " but got: " + actual,
             ((Number) actual).longValue() >= 0
         );
     }
 
     /** Execute a PPL query expected to return a single {@code cnt} row and assert the value. */
-    private void assertSingleCount(String ppl, long expected) throws IOException {
+    private void assertSingleCount(String ppl, long expected, String mode) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
         List<List<Object>> rows = (List<List<Object>>) response.get("rows");
-        assertNotNull("Response missing 'rows' for query: " + ppl, rows);
-        assertEquals("Expected single count row for query: " + ppl, 1, rows.size());
+        assertNotNull("[" + mode + "] Response missing 'rows' for query: " + ppl, rows);
+        assertEquals("[" + mode + "] Expected single count row for query: " + ppl, 1, rows.size());
         Object actual = rows.get(0).get(0);
         assertTrue(
-            "Expected numeric count for query: " + ppl + " but got: " + actual,
+            "[" + mode + "] Expected numeric count for query: " + ppl + " but got: " + actual,
             actual instanceof Number
         );
-        assertEquals("Count mismatch for query: " + ppl, expected, ((Number) actual).longValue());
+        assertEquals("[" + mode + "] Count mismatch for query: " + ppl, expected, ((Number) actual).longValue());
     }
 
     /** Send {@code POST /_analytics/ppl} and return the parsed JSON body. */
     private Map<String, Object> executePpl(String ppl) throws IOException {
-        ensureDataProvisioned();
         Request request = new Request("POST", "/_analytics/ppl");
         request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
         Response response = client().performRequest(request);
         return assertOkAndParse(response, "PPL: " + ppl);
+    }
+
+    private void applySetting(String key, String value) throws IOException {
+        Request request = new Request("PUT", "/_cluster/settings");
+        // Use transient so a test failure doesn't leave a persistent setting on the cluster.
+        request.setJsonEntity("{\"transient\": {\"" + key + "\": " + value + "}}");
+        client().performRequest(request);
+    }
+
+    private void resetSetting(String key) throws IOException {
+        Request request = new Request("PUT", "/_cluster/settings");
+        request.setJsonEntity("{\"transient\": {\"" + key + "\": null}}");
+        client().performRequest(request);
     }
 
     /**

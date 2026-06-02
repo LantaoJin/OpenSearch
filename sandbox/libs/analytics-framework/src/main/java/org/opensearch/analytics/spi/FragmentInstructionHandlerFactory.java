@@ -25,8 +25,14 @@ public interface FragmentInstructionHandlerFactory {
 
     // ── Coordinator-side: create instruction nodes ──
 
-    /** Creates a shard scan instruction node. */
-    Optional<InstructionNode> createShardScanNode();
+    /**
+     * Creates a shard scan instruction node.
+     *
+     * @param logicalTableName the planner's logical table name (alias / index pattern / index) the
+     *                         backend should register the scanned shard's table under, or {@code null}
+     *                         to let the data node fall back to the concrete shard index name
+     */
+    Optional<InstructionNode> createShardScanNode(String logicalTableName);
 
     /** Creates a filter delegation instruction node with the given delegation metadata. */
     Optional<InstructionNode> createFilterDelegationNode(
@@ -35,8 +41,18 @@ public interface FragmentInstructionHandlerFactory {
         List<DelegatedExpression> delegatedQueries
     );
 
-    /** Creates a shard scan with delegation instruction node — combines scan setup with delegation config. */
-    Optional<InstructionNode> createShardScanWithDelegationNode(FilterTreeShape treeShape, int delegatedPredicateCount);
+    /**
+     * Creates a shard scan with delegation instruction node — combines scan setup with delegation config.
+     *
+     * @param logicalTableName the planner's logical table name (alias / index pattern / index) the
+     *                         backend should register the scanned shard's table under, or {@code null}
+     *                         to let the data node fall back to the concrete shard index name
+     */
+    Optional<InstructionNode> createShardScanWithDelegationNode(
+        String logicalTableName,
+        FilterTreeShape treeShape,
+        int delegatedPredicateCount
+    );
 
     /** Creates a partial aggregate instruction node. */
     Optional<InstructionNode> createPartialAggregateNode();
