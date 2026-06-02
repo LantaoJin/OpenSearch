@@ -30,7 +30,7 @@ import java.util.List;
 public class PlanAlternativeSerializationTests extends OpenSearchTestCase {
 
     public void testRoundTripWithShardScanOnly() throws IOException {
-        List<InstructionNode> instructions = List.of(new ShardScanInstructionNode("logs-*"));
+        List<InstructionNode> instructions = List.of(new ShardScanInstructionNode("logs-*", false));
         FragmentExecutionRequest.PlanAlternative original = new FragmentExecutionRequest.PlanAlternative(
             "datafusion",
             new byte[] { 1, 2, 3 },
@@ -69,7 +69,8 @@ public class PlanAlternativeSerializationTests extends OpenSearchTestCase {
         ShardScanWithDelegationInstructionNode delegationNode = new ShardScanWithDelegationInstructionNode(
             "events",
             FilterTreeShape.CONJUNCTIVE,
-            2
+            2,
+            false
         );
         List<InstructionNode> instructions = List.of(delegationNode);
         FragmentExecutionRequest.PlanAlternative original = new FragmentExecutionRequest.PlanAlternative(

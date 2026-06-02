@@ -20,17 +20,22 @@ import org.opensearch.analytics.exec.CoordinatorAllocatorHandle;
 import org.opensearch.analytics.exec.DefaultPlanExecutor;
 import org.opensearch.analytics.exec.QueryPlanExecutor;
 import org.opensearch.analytics.exec.QueryScheduler;
+import org.opensearch.analytics.exec.ReaderContextStore;
 import org.opensearch.analytics.exec.Scheduler;
 import org.opensearch.analytics.exec.action.AnalyticsQueryAction;
-import org.opensearch.analytics.exec.join.JoinStrategyMetrics;
+import org.opensearch.analytics.exec.join.MppStrategyMetrics;
 import org.opensearch.analytics.exec.shuffle.ShuffleBufferManager;
 import org.opensearch.analytics.planner.CapabilityRegistry;
 import org.opensearch.analytics.planner.FieldStorageResolver;
-import org.opensearch.analytics.rest.RestJoinStrategyStatsAction;
+import org.opensearch.analytics.rest.RestMppStrategyStatsAction;
 import org.opensearch.analytics.schema.OpenSearchSchemaBuilder;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.analytics.stats.AnalyticsStats;
+import org.opensearch.analytics.stats.AnalyticsStatsCollector;
+import org.opensearch.analytics.stats.RestAnalyticsStatsAction;
 import org.opensearch.arrow.allocator.ArrowNativeAllocator;
 import org.opensearch.arrow.spi.NativeAllocatorPoolConfig;
+import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.node.DiscoveryNodes;
 import org.opensearch.cluster.service.ClusterService;
@@ -46,10 +51,12 @@ import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
+import org.opensearch.index.search.stats.SearchStats;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.ExtensiblePlugin;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.PluginComponentRegistry;
+import org.opensearch.plugins.SearchStatsContributor;
 import org.opensearch.repositories.RepositoriesService;
 import org.opensearch.rest.RestController;
 import org.opensearch.rest.RestHandler;
@@ -73,7 +80,7 @@ import java.util.function.Supplier;
  *
  * @opensearch.internal
  */
-public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionPlugin {
+public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionPlugin, SearchStatsContributor {
 
     private static final Logger logger = LogManager.getLogger(AnalyticsPlugin.class);
 
@@ -105,11 +112,12 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     public AnalyticsPlugin() {}
 
     private final List<AnalyticsSearchBackendPlugin> backEnds = new ArrayList<>();
-    private SqlOperatorTable operatorTable;
     private AnalyticsSearchService searchService;
-    private final JoinStrategyMetrics joinStrategyMetrics = new JoinStrategyMetrics();
+    private final MppStrategyMetrics mppStrategyMetrics = new MppStrategyMetrics();
     private final ShuffleBufferManager shuffleBufferManager = new ShuffleBufferManager();
     private CoordinatorAllocatorHandle coordinatorAllocatorHandle;
+    private ReaderContextStore readerContextStore;
+    private final AnalyticsStatsCollector statsCollector = new AnalyticsStatsCollector();
 
     @SuppressWarnings("rawtypes")
     @Override
@@ -135,17 +143,19 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         ArrowNativeAllocator nativeAllocator = pluginComponentRegistry.getComponent(ArrowNativeAllocator.class)
             .orElseThrow(() -> new IllegalStateException("ArrowNativeAllocator not available; arrow-base plugin must be installed"));
 
-        operatorTable = aggregateOperatorTables();
         CapabilityRegistry capabilityRegistry = new CapabilityRegistry(backEnds, FieldStorageResolver::new);
 
         Map<String, AnalyticsSearchBackendPlugin> backEndsByName = new LinkedHashMap<>();
         for (AnalyticsSearchBackendPlugin be : backEnds) {
             backEndsByName.put(be.name(), be);
         }
-        searchService = new AnalyticsSearchService(backEndsByName, nativeAllocator, namedWriteableRegistry);
+        readerContextStore = new ReaderContextStore(threadPool);
+        clusterService.getClusterSettings()
+            .addSettingsUpdateConsumer(ReaderContextStore.READER_CONTEXT_KEEP_ALIVE, readerContextStore::setKeepAlive);
+        searchService = new AnalyticsSearchService(backEndsByName, nativeAllocator, namedWriteableRegistry, readerContextStore);
         searchService.setShuffleBufferRegistry(shuffleBufferManager);
         searchService.setShuffleSenderDeps(client, threadPool, clusterService);
-        DefaultEngineContext ctx = new DefaultEngineContext(clusterService, indexNameExpressionResolver, operatorTable, backEndsByName);
+        DefaultEngineContextProvider ctx = new DefaultEngineContextProvider(clusterService, indexNameExpressionResolver, backEndsByName);
         // Build the coordinator allocator under POOL_QUERY here, in the plugin, so that the
         // plugin's lifecycle owns its lifetime. The Guice-bound DefaultPlanExecutor consumes
         // it via the handle without taking on close responsibility — mirroring how
@@ -160,7 +170,15 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         // buffer manager is exposed both here (for Guice-injected consumers like
         // DefaultPlanExecutor) and via createGuiceModules' toInstance binding so the
         // transport handler that populates buffers from the wire side sees the same instance.
-        return List.of(searchService, ctx, capabilityRegistry, joinStrategyMetrics, shuffleBufferManager, coordinatorAllocatorHandle);
+        return List.of(
+            searchService,
+            ctx,
+            capabilityRegistry,
+            mppStrategyMetrics,
+            shuffleBufferManager,
+            coordinatorAllocatorHandle,
+            statsCollector
+        );
     }
 
     @Override
@@ -173,7 +191,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         IndexNameExpressionResolver indexNameExpressionResolver,
         Supplier<DiscoveryNodes> nodesInCluster
     ) {
-        return List.of(new RestJoinStrategyStatsAction(joinStrategyMetrics));
+        return List.of(new RestMppStrategyStatsAction(mppStrategyMetrics), new RestAnalyticsStatsAction(statsCollector));
     }
 
     @Override
@@ -182,7 +200,7 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
         return List.of(b -> {
             b.bind(new TypeLiteral<QueryPlanExecutor<RelNode, Iterable<Object[]>>>() {
             }).to(DefaultPlanExecutor.class);
-            b.bind(EngineContext.class).to(DefaultEngineContext.class);
+            b.bind(EngineContextProvider.class).to(DefaultEngineContextProvider.class);
             // Singleton bind on the concrete class so node-injector lookups for
             // QueryScheduler.class don't fall back to a JIT binding (which would
             // re-instantiate AnalyticsSearchTransportService, whose ctor registers
@@ -210,9 +228,11 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
 
     @Override
     public List<Setting<?>> getSettings() {
-        List<Setting<?>> all = new ArrayList<>(AnalyticsSettings.ALL_SETTINGS);
-        all.add(COORDINATOR_BUFFER_LIMIT);
-        return all;
+        List<Setting<?>> settings = new ArrayList<>(AnalyticsSettings.ALL_SETTINGS);
+        settings.add(COORDINATOR_BUFFER_LIMIT);
+        settings.add(ReaderContextStore.READER_CONTEXT_KEEP_ALIVE);
+        settings.addAll(org.opensearch.analytics.settings.AnalyticsApproximationSettings.all());
+        return List.copyOf(settings);
     }
 
     @Override
@@ -226,6 +246,16 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
 
     static int schedulerPoolSize() {
         return Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
+    }
+
+    @Override
+    public SearchStats contributeSearchStats() {
+        AnalyticsStats.LatencyStats elapsed = statsCollector.snapshot().queries().elapsedMs();
+        if (elapsed.count() == 0) {
+            return null;
+        }
+        SearchStats.Stats stats = new SearchStats.Stats.Builder().queryCount(elapsed.count()).queryTimeInMillis(elapsed.sumMs()).build();
+        return new SearchStats(stats, 0, null);
     }
 
     @Override
@@ -244,17 +274,24 @@ public class AnalyticsPlugin extends Plugin implements ExtensiblePlugin, ActionP
     }
 
     /**
-     * Default implementation of {@link EngineContext}. The {@link IndexNameExpressionResolver}
+     * Default implementation of {@link EngineContextProvider}. The {@link IndexNameExpressionResolver}
      * is the cluster's resolver — built by the OpenSearch server with security-plugin extensions,
      * system-index access checks, and ThreadContext threading. Building schemas with a fresh
      * resolver would silently bypass those checks.
      */
-    record DefaultEngineContext(ClusterService clusterService, IndexNameExpressionResolver indexNameExpressionResolver,
-        SqlOperatorTable operatorTable, Map<String, AnalyticsSearchBackendPlugin> backends) implements EngineContext {
+    record DefaultEngineContextProvider(ClusterService clusterService, IndexNameExpressionResolver indexNameExpressionResolver, Map<
+        String,
+        AnalyticsSearchBackendPlugin> backends) implements EngineContextProvider {
 
         @Override
-        public SchemaPlus getSchema() {
-            return OpenSearchSchemaBuilder.buildSchema(clusterService.state(), indexNameExpressionResolver);
+        public QueryRequestContext getContext(ClusterState clusterState) {
+            SchemaPlus schema = OpenSearchSchemaBuilder.buildSchema(clusterState, indexNameExpressionResolver);
+            return new QueryRequestContext(clusterState, schema);
+        }
+
+        @Override
+        public QueryRequestContext getContext() {
+            return getContext(clusterService.state());
         }
 
         @Override

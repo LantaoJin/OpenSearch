@@ -21,12 +21,16 @@ import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.logical.LogicalAggregate;
 import org.apache.calcite.rel.metadata.RelMetadataQuery;
 import org.apache.calcite.rex.RexLiteral;
+import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.util.ImmutableBitSet;
 import org.opensearch.analytics.planner.RelNodeUtils;
+import org.opensearch.analytics.spi.AggregateFunction.IntermediateField;
 import org.opensearch.analytics.spi.FieldStorageInfo;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -59,6 +63,8 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
      * constant columns below FINAL, since the StageInputScan only carries the state.
      */
     private final Map<Integer, List<RexLiteral>> finalExtraLiteralArgs;
+    /** Per-call {@link IntermediateField} classification, parallel to {@link #getAggCallList()}; null entry = no SPI decomposition; empty for SINGLE/PARTIAL. */
+    private final List<IntermediateField> perCallIntermediateField;
 
     public OpenSearchAggregate(
         RelOptCluster cluster,
@@ -71,7 +77,7 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
         List<String> viableBackends,
         Map<Integer, AggregateCallAnnotation> callAnnotations
     ) {
-        this(cluster, traitSet, input, groupSet, groupSets, aggCalls, mode, viableBackends, callAnnotations, Map.of());
+        this(cluster, traitSet, input, groupSet, groupSets, aggCalls, mode, viableBackends, callAnnotations, Map.of(), List.of());
     }
 
     public OpenSearchAggregate(
@@ -86,11 +92,58 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
         Map<Integer, AggregateCallAnnotation> callAnnotations,
         Map<Integer, List<RexLiteral>> finalExtraLiteralArgs
     ) {
+        this(
+            cluster,
+            traitSet,
+            input,
+            groupSet,
+            groupSets,
+            aggCalls,
+            mode,
+            viableBackends,
+            callAnnotations,
+            finalExtraLiteralArgs,
+            List.of()
+        );
+    }
+
+    public OpenSearchAggregate(
+        RelOptCluster cluster,
+        RelTraitSet traitSet,
+        RelNode input,
+        ImmutableBitSet groupSet,
+        List<ImmutableBitSet> groupSets,
+        List<AggregateCall> aggCalls,
+        AggregateMode mode,
+        List<String> viableBackends,
+        Map<Integer, AggregateCallAnnotation> callAnnotations,
+        Map<Integer, List<RexLiteral>> finalExtraLiteralArgs,
+        List<IntermediateField> perCallIntermediateField
+    ) {
         super(cluster, traitSet, List.of(), input, groupSet, groupSets, aggCalls);
         this.mode = mode;
         this.viableBackends = viableBackends;
         this.callAnnotations = Map.copyOf(callAnnotations);
         this.finalExtraLiteralArgs = Map.copyOf(finalExtraLiteralArgs);
+        // Collections.unmodifiableList — List.copyOf would NPE on the null pass-through entries.
+        this.perCallIntermediateField = Collections.unmodifiableList(new ArrayList<>(perCallIntermediateField));
+    }
+
+    /** Builds a FINAL aggregate post-rewrite; clears both stashes so a later {@code copy()} can't replay them. */
+    public static OpenSearchAggregate finalAfterRewrite(OpenSearchAggregate prior, RelNode newInput, List<AggregateCall> rebuiltCalls) {
+        return new OpenSearchAggregate(
+            prior.getCluster(),
+            prior.getTraitSet(),
+            newInput,
+            prior.getGroupSet(),
+            prior.getGroupSets(),
+            rebuiltCalls,
+            AggregateMode.FINAL,
+            prior.viableBackends,
+            prior.callAnnotations,
+            Map.of(),
+            List.of()
+        );
     }
 
     public AggregateMode getMode() {
@@ -104,6 +157,11 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
 
     public Map<Integer, List<RexLiteral>> getFinalExtraLiteralArgs() {
         return finalExtraLiteralArgs;
+    }
+
+    /** See {@link #perCallIntermediateField}. */
+    public List<IntermediateField> getIntermediateFields() {
+        return perCallIntermediateField;
     }
 
     @Override
@@ -131,9 +189,32 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
             }
         }
 
-        // Agg results: derived columns with no physical storage
+        // Agg results: derived columns whose physical-deps are the union of arg refs' deps
+        // (preserving first-seen order across argList, then rexList).
         for (AggregateCall aggCall : getAggCallList()) {
-            outputStorage.add(FieldStorageInfo.derivedColumn(aggCall.getName(), aggCall.getType().getSqlTypeName()));
+            LinkedHashSet<String> deps = new LinkedHashSet<>();
+            for (int argIdx : aggCall.getArgList()) {
+                if (argIdx >= inputStorage.size()) {
+                    throw new IllegalStateException(
+                        "AggregateCall arg["
+                            + argIdx
+                            + "] has no matching FieldStorageInfo entry "
+                            + "(input only declares "
+                            + inputStorage.size()
+                            + " columns)"
+                    );
+                }
+                FieldStorageInfo src = inputStorage.get(argIdx);
+                if (src.isDerived()) {
+                    deps.addAll(src.getDependsOnPhysicalCols());
+                } else {
+                    deps.add(src.getFieldName());
+                }
+            }
+            for (RexNode rex : aggCall.rexList) {
+                deps.addAll(RelNodeUtils.resolvePhysicalDeps(rex, inputStorage));
+            }
+            outputStorage.add(FieldStorageInfo.derivedColumn(aggCall.getName(), aggCall.getType().getSqlTypeName(), deps));
         }
 
         return outputStorage;
@@ -157,15 +238,31 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
             mode,
             viableBackends,
             callAnnotations,
-            finalExtraLiteralArgs
+            finalExtraLiteralArgs,
+            perCallIntermediateField
         );
     }
 
     /**
      * SINGLE-mode aggregate over partitioned input is incorrect (each shard would aggregate
-     * independently, results would never merge). Return infinite cost so Volcano picks the
-     * split alternative. Allow SOURCE/EXECUTION SINGLETON (already gathered) and ANY
-     * (Volcano's "still exploring" placeholder). PARTIAL/FINAL skip the gate.
+     * independently, results would never merge). FINAL has two legal input shapes:
+     * SINGLETON+COORDINATOR (the M0/M1 coord-centric path — partials gathered to coord, FINAL
+     * merges) and HASH+WORKER (the M3 shuffle path — partials hash-shuffled by group keys,
+     * FINAL runs on each worker over its hash bucket). Anything else is rejected.
+     *
+     * <p>PARTIAL is unconstrained (it consumes whatever the child distribution is and emits
+     * partial-state output at the same locality).
+     *
+     * <p>The check tolerates ANY (Volcano's "still exploring" placeholder) on either side so the
+     * planner can register alternatives during memo expansion before the trait is finalized.
+     *
+     * <p>Cost: FINAL pays merge cost proportional to its input rows. At COORDINATOR+SINGLETON
+     * the merge runs serially → cost = inputRows. At HASH+WORKER+N the merge runs across N
+     * workers in parallel → cost = inputRows / N. The parallelism win is what makes the shuffle
+     * path beat the coord-centric path on high-cardinality {@code GROUP BY} despite paying an
+     * extra gather ER on top: for shuffle to win the savings on FINAL must exceed the extra
+     * gather ER's setup + final-output rows. This naturally amortizes only at scale, leaving
+     * tiny aggregates on coord-centric.
      */
     @Override
     public RelOptCost computeSelfCost(RelOptPlanner planner, RelMetadataQuery mq) {
@@ -178,6 +275,38 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
                 if (!singletonOrAny) {
                     return planner.getCostFactory().makeInfiniteCost();
                 }
+            }
+        } else if (mode == AggregateMode.FINAL) {
+            int partitionCount = 1;
+            boolean traitResolved = false;
+            for (int index = 0; index < getInput().getTraitSet().size(); index++) {
+                RelTrait trait = getInput().getTraitSet().getTrait(index);
+                if (!(trait instanceof OpenSearchDistribution distribution)) continue;
+                if (distribution.getType() == RelDistribution.Type.ANY) continue;
+                boolean singletonCoord = distribution.getType() == RelDistribution.Type.SINGLETON
+                    && distribution.getLocality() == OpenSearchDistribution.Locality.COORDINATOR;
+                boolean hashWorker = distribution.getType() == RelDistribution.Type.HASH_DISTRIBUTED
+                    && distribution.getLocality() == OpenSearchDistribution.Locality.WORKER;
+                if (!singletonCoord && !hashWorker) {
+                    return planner.getCostFactory().makeInfiniteCost();
+                }
+                traitResolved = true;
+                if (hashWorker && distribution.getPartitionCount() != null) {
+                    partitionCount = Math.max(1, distribution.getPartitionCount());
+                }
+            }
+            // FINAL pays a merge cost proportional to its input row count. Coord-centric merges
+            // serially (partitionCount=1); HASH+WORKER merges in parallel across N workers
+            // (partitionCount=N). The /N discount is what lets the shuffle path beat the
+            // coord-centric path on high-cardinality GROUP BY despite paying an extra gather
+            // ER on top — but only when the savings exceed the gather's setup, so tiny inputs
+            // still route coord-centric. Use tinyCost while the trait is unresolved (Volcano's
+            // ANY placeholder) so memo expansion can register alternatives without committing
+            // to a cost.
+            if (traitResolved) {
+                double finalRows = mq.getRowCount(getInput());
+                double finalCost = finalRows / partitionCount;
+                return planner.getCostFactory().makeCost(finalCost, finalCost, 0);
             }
         }
         return planner.getCostFactory().makeTinyCost();
@@ -225,7 +354,8 @@ public class OpenSearchAggregate extends Aggregate implements OpenSearchRelNode 
             mode,
             List.of(backend),
             rebuilt,
-            finalExtraLiteralArgs
+            finalExtraLiteralArgs,
+            perCallIntermediateField
         );
     }
 

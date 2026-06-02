@@ -32,6 +32,8 @@ import org.opensearch.analytics.spi.ScanCapability;
 import org.opensearch.analytics.spi.ShardScanInstructionNode;
 import org.opensearch.analytics.spi.ShardScanWithDelegationInstructionNode;
 import org.opensearch.analytics.spi.WindowCapability;
+import org.opensearch.analytics.spi.WindowFunction;
+import org.opensearch.analytics.spi.WindowFunctionAdapter;
 
 import java.util.List;
 import java.util.Map;
@@ -107,6 +109,11 @@ abstract class MockBackend implements AnalyticsSearchBackendPlugin {
             }
 
             @Override
+            public Map<WindowFunction, WindowFunctionAdapter> windowFunctionAdapters() {
+                return self.windowFunctionAdapters();
+            }
+
+            @Override
             public Map<ScalarFunction, DelegatedPredicateSerializer> delegatedPredicateSerializers() {
                 return self.delegatedPredicateSerializers();
             }
@@ -158,7 +165,12 @@ abstract class MockBackend implements AnalyticsSearchBackendPlugin {
         return Map.of();
     }
 
-    protected Map<ScalarFunction, DelegatedPredicateSerializer> delegatedPredicateSerializers() {
+    protected Map<WindowFunction, WindowFunctionAdapter> windowFunctionAdapters() {
+        return Map.of();
+    }
+
+    @Override
+    public Map<ScalarFunction, DelegatedPredicateSerializer> delegatedPredicateSerializers() {
         return Map.of();
     }
 
@@ -166,8 +178,8 @@ abstract class MockBackend implements AnalyticsSearchBackendPlugin {
     public FragmentInstructionHandlerFactory getInstructionHandlerFactory() {
         return new FragmentInstructionHandlerFactory() {
             @Override
-            public Optional<InstructionNode> createShardScanNode(String logicalTableName) {
-                return Optional.of(new ShardScanInstructionNode(logicalTableName));
+            public Optional<InstructionNode> createShardScanNode(String logicalTableName, boolean requestsRowIds) {
+                return Optional.of(new ShardScanInstructionNode(logicalTableName, requestsRowIds));
             }
 
             @Override
@@ -183,9 +195,12 @@ abstract class MockBackend implements AnalyticsSearchBackendPlugin {
             public Optional<InstructionNode> createShardScanWithDelegationNode(
                 String logicalTableName,
                 FilterTreeShape treeShape,
-                int delegatedPredicateCount
+                int delegatedPredicateCount,
+                boolean requestsRowIds
             ) {
-                return Optional.of(new ShardScanWithDelegationInstructionNode(logicalTableName, treeShape, delegatedPredicateCount));
+                return Optional.of(
+                    new ShardScanWithDelegationInstructionNode(logicalTableName, treeShape, delegatedPredicateCount, requestsRowIds)
+                );
             }
 
             @Override

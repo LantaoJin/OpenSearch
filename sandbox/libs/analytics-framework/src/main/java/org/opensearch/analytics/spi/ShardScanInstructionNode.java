@@ -10,12 +10,16 @@ package org.opensearch.analytics.spi;
 
 import org.opensearch.core.common.io.stream.StreamInput;
 import org.opensearch.core.common.io.stream.StreamOutput;
+import org.opensearch.core.common.io.stream.Writeable;
 
 import java.io.IOException;
 
 /**
  * Instruction node for base shard scan setup — reader acquisition, SessionContext creation,
- * default table provider registration.
+ * table provider registration. {@code requestsRowIds} signals that the shard scan needs to
+ * emit shard-global {@code __row_id__} values (QTF query phase). Inherited by
+ * {@link ShardScanWithDelegationInstructionNode} so the same flag applies whether or not
+ * filter delegation is in play — QTF and delegation are orthogonal concerns.
  *
  * <p>Carries the planner's <em>logical</em> table name (the alias / index-pattern / index the
  * query referenced), captured on the coordinator from the {@code OpenSearchTableScan} leaf. The
@@ -26,20 +30,27 @@ import java.io.IOException;
  *
  * @opensearch.internal
  */
-public class ShardScanInstructionNode implements InstructionNode {
+public class ShardScanInstructionNode implements InstructionNode, Writeable {
 
     private final String logicalTableName;
+    private final boolean requestsRowIds;
 
     public ShardScanInstructionNode() {
-        this((String) null);
+        this(null, false);
     }
 
-    public ShardScanInstructionNode(String logicalTableName) {
+    public ShardScanInstructionNode(boolean requestsRowIds) {
+        this(null, requestsRowIds);
+    }
+
+    public ShardScanInstructionNode(String logicalTableName, boolean requestsRowIds) {
         this.logicalTableName = logicalTableName;
+        this.requestsRowIds = requestsRowIds;
     }
 
     public ShardScanInstructionNode(StreamInput in) throws IOException {
         this.logicalTableName = in.readOptionalString();
+        this.requestsRowIds = in.readBoolean();
     }
 
     /**
@@ -51,6 +62,10 @@ public class ShardScanInstructionNode implements InstructionNode {
         return logicalTableName;
     }
 
+    public boolean requestsRowIds() {
+        return requestsRowIds;
+    }
+
     @Override
     public InstructionType type() {
         return InstructionType.SETUP_SHARD_SCAN;
@@ -59,5 +74,6 @@ public class ShardScanInstructionNode implements InstructionNode {
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         out.writeOptionalString(logicalTableName);
+        out.writeBoolean(requestsRowIds);
     }
 }

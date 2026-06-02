@@ -8,7 +8,6 @@
 
 package org.opensearch.analytics.qa;
 
-import org.apache.lucene.tests.util.LuceneTestCase.AwaitsFix;
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
 import org.opensearch.client.ResponseException;
@@ -19,7 +18,7 @@ import java.util.Map;
 
 /**
  * Integration tests for PPL commands that lower to {@code LogicalJoin} on the
- * analytics-engine route (POST /_analytics/ppl).
+ * analytics-engine route (POST /_plugins/_ppl).
  *
  * <p>Exercises the three commands that produce a join RelNode:
  * <ul>
@@ -77,7 +76,8 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
      * Lazily provision both calcs indices on first invocation. Called inside test
      * methods — {@code client()} is not available in {@code @BeforeClass}.
      */
-    private void ensureDataProvisioned() throws IOException {
+    @Override
+    protected void onBeforeQuery() throws IOException {
         if (dataProvisioned == false) {
             DatasetProvisioner.provision(client(), CALCS, SHARDS);
             DatasetProvisioner.provision(client(), CALCS_ALT, SHARDS);
@@ -217,15 +217,11 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
 
     /**
      * appendcol pairs the outer pipeline with a subsearch by synthesized row
-     * number. PPL grammar does not allow {@code source=…} inside the
-     * {@code appendcol [ … ]} brackets — the subsearch operates on the implicit
-     * upstream input.
-     *
-     * <p><b>Pending (window-function track)</b>: appendcol lowers to
-     * {@code ROW_NUMBER() OVER (ORDER BY …)} for pairing rows. Window-function
-     * support is a follow-up.
+     * number, lowered to {@code ROW_NUMBER() OVER (ORDER BY …)} + a FULL OUTER
+     * LogicalJoin on the row numbers. PPL grammar does not allow {@code source=…}
+     * inside the {@code appendcol [ … ]} brackets — the subsearch operates on
+     * the implicit upstream input.
      */
-    @AwaitsFix(bugUrl = "Task #113: appendcol plans correctly (ROW_NUMBER supported) but hits the same AggregateSplit-under-per-side-ER issue surfacing a runtime schema coercion mismatch.")
     public void testAppendcol() throws IOException {
         final String ppl = "source="
             + CALCS.indexName
@@ -298,7 +294,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
      * the same expected single-row count under both modes.
      */
     private void assertSingleCountBothMppModes(String ppl, long expected) throws IOException {
-        ensureDataProvisioned();
+        // Data is provisioned by the onBeforeQuery() hook (fired via @Before before each test).
         applySetting("analytics.mpp.enabled", "false");
         assertSingleCount(ppl, expected, "mpp.enabled=false");
         applySetting("analytics.mpp.enabled", "true");
@@ -311,7 +307,7 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
      * exact row count over the calcs dataset isn't pinned (right/semi/anti).
      */
     private void assertRowCountPositiveBothMppModes(String ppl) throws IOException {
-        ensureDataProvisioned();
+        // Data is provisioned by the onBeforeQuery() hook (fired via @Before before each test).
         applySetting("analytics.mpp.enabled", "false");
         assertRowCountPositive(ppl, "mpp.enabled=false");
         applySetting("analytics.mpp.enabled", "true");
@@ -327,8 +323,8 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
     private void assertRowCountPositive(String ppl, String mode) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
-        assertNotNull("[" + mode + "] Response missing 'rows' for query: " + ppl, rows);
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
+        assertNotNull("[" + mode + "] Response missing 'datarows' for query: " + ppl, rows);
         assertEquals("[" + mode + "] Expected single count row for query: " + ppl, 1, rows.size());
         Object actual = rows.get(0).get(0);
         assertTrue(
@@ -345,8 +341,8 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
     private void assertSingleCount(String ppl, long expected, String mode) throws IOException {
         Map<String, Object> response = executePpl(ppl);
         @SuppressWarnings("unchecked")
-        List<List<Object>> rows = (List<List<Object>>) response.get("rows");
-        assertNotNull("[" + mode + "] Response missing 'rows' for query: " + ppl, rows);
+        List<List<Object>> rows = (List<List<Object>>) response.get("datarows");
+        assertNotNull("[" + mode + "] Response missing 'datarows' for query: " + ppl, rows);
         assertEquals("[" + mode + "] Expected single count row for query: " + ppl, 1, rows.size());
         Object actual = rows.get(0).get(0);
         assertTrue(
@@ -354,14 +350,6 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
             actual instanceof Number
         );
         assertEquals("[" + mode + "] Count mismatch for query: " + ppl, expected, ((Number) actual).longValue());
-    }
-
-    /** Send {@code POST /_analytics/ppl} and return the parsed JSON body. */
-    private Map<String, Object> executePpl(String ppl) throws IOException {
-        Request request = new Request("POST", "/_analytics/ppl");
-        request.setJsonEntity("{\"query\": \"" + escapeJson(ppl) + "\"}");
-        Response response = client().performRequest(request);
-        return assertOkAndParse(response, "PPL: " + ppl);
     }
 
     private void applySetting(String key, String value) throws IOException {
@@ -390,8 +378,8 @@ public class JoinCommandIT extends AnalyticsRestTestCase {
         } catch (ResponseException e) {
             String body;
             try {
-                body = org.opensearch.test.rest.OpenSearchRestTestCase.entityAsMap(e.getResponse()).toString();
-            } catch (IOException ioe) {
+                body = org.apache.hc.core5.http.io.entity.EntityUtils.toString(e.getResponse().getEntity());
+            } catch (Exception ioe) {
                 body = e.getMessage();
             }
             assertTrue(

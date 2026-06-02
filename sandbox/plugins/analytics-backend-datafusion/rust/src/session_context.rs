@@ -60,6 +60,8 @@ pub struct SessionContextHandle {
 pub struct IndexedExecutionConfig {
     pub tree_shape: i32,
     pub delegated_predicate_count: i32,
+    /// QTF query phase: scan must emit shard-global `__row_id__`.
+    pub requests_row_ids: bool,
 }
 
 /// Widens `inferred` to the plan's `base_schema` (for index-pattern / alias scans) so the
@@ -136,7 +138,7 @@ pub async unsafe fn create_session_context(
     let shard_view = &*(shard_view_ptr as *const ShardView);
 
     let global_pool = runtime.runtime_env.memory_pool.clone();
-    let query_context = QueryTrackingContext::new(context_id, global_pool.clone());
+    let query_context = QueryTrackingContext::new(context_id, global_pool.clone(), crate::query_tracker::QueryType::Shard);
     let query_memory_pool = query_context
         .memory_pool()
         .map(|p| p as Arc<dyn MemoryPool>);
@@ -200,12 +202,26 @@ pub async unsafe fn create_session_context(
     config.options_mut().execution.target_partitions = effective_partitions;
     config.options_mut().execution.batch_size = effective_batch_size;
 
-    let state = SessionStateBuilder::new()
+    let mut state_builder = SessionStateBuilder::new()
         .with_config(config)
         .with_runtime_env(Arc::from(runtime_env))
         .with_default_features()
-        .with_physical_optimizer_rules(crate::agg_mode::physical_optimizer_rules_without_combine())
-        .build();
+        .with_physical_optimizer_rules(crate::agg_mode::physical_optimizer_rules_without_combine());
+
+    // For ListingTable query strategy:
+    // 1. Add ProjectRowIdAnalyzer (logical) — ensures __row_id__ survives pruning.
+    // 2. Add ProjectRowIdOptimizer (physical) — computes __row_id__ + row_base.
+    if query_config.query_strategy == crate::datafusion_query_config::QueryStrategy::ListingTable {
+        state_builder = state_builder
+            .with_analyzer_rule(
+                Arc::new(crate::project_row_id_analyzer::ProjectRowIdAnalyzer::new())
+            )
+            .with_physical_optimizer_rule(
+                Arc::new(crate::project_row_id_optimizer::ProjectRowIdOptimizer)
+            );
+    }
+
+    let state = state_builder.build();
 
     let ctx = SessionContext::new_with_state(state);
     // Register OpenSearch UDFs (parse, item, mvappend, mvfind, mvzip, convert_tz, …)
@@ -215,6 +231,7 @@ pub async unsafe fn create_session_context(
     // of building a fresh one.
     crate::udf::register_all(&ctx);
     crate::udaf::register_all(&ctx);
+    crate::udwf::register_all(&ctx);
 
     // Register default ListingTable for parquet scans.
     let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
@@ -303,7 +320,7 @@ pub async unsafe fn create_worker_session_context(
     let runtime = &*(runtime_ptr as *const DataFusionRuntime);
 
     let global_pool = runtime.runtime_env.memory_pool.clone();
-    let query_context = QueryTrackingContext::new(context_id, global_pool.clone());
+    let query_context = QueryTrackingContext::new(context_id, global_pool.clone(), crate::query_tracker::QueryType::Shard);
     let query_memory_pool = query_context
         .memory_pool()
         .map(|p| p as Arc<dyn MemoryPool>);
@@ -375,18 +392,20 @@ pub async unsafe fn create_session_context_indexed(
     context_id: i64,
     tree_shape: i32,
     delegated_predicate_count: i32,
+    requests_row_ids: bool,
     query_config: DatafusionQueryConfig,
     plan_bytes: &[u8],
 ) -> Result<i64, DataFusionError> {
     let ptr = create_session_context(runtime_ptr, shard_view_ptr, table_name, context_id, query_config, plan_bytes).await?;
 
-    // Augment with indexed config and UDF registration
+    // Augment with indexed config. The delegation marker UDFs (index_filter, delegation_possible)
+    // are now registered for every session by udf::register_all (via create_session_context above);
+    // the indexed path additionally UNWRAPS them before execution.
     let handle = &mut *(ptr as *mut SessionContextHandle);
-    handle.ctx.register_udf(crate::indexed_table::substrait_to_tree::create_index_filter_udf());
-    handle.ctx.register_udf(crate::indexed_table::substrait_to_tree::create_delegation_possible_udf());
     handle.indexed_config = Some(IndexedExecutionConfig {
         tree_shape,
         delegated_predicate_count,
+        requests_row_ids,
     });
 
     Ok(ptr)
@@ -546,7 +565,7 @@ mod tests {
         let table_path = datafusion::datasource::listing::ListingTableUrl::parse("file:///tmp")
             .expect("table_path");
         let global_pool = ctx.runtime_env().memory_pool.clone();
-        let query_context = QueryTrackingContext::new(0, global_pool);
+        let query_context = QueryTrackingContext::new(0, global_pool, crate::query_tracker::QueryType::Shard);
 
         let handle = SessionContextHandle {
             ctx,
