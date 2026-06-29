@@ -17,7 +17,8 @@
 
 > **TL;DR** — The OpenSearch analytics engine can now execute **multi-way joins** and **aggregations over joins** as a *multi-stage distributed* computation that runs in parallel across data nodes, instead of gathering all the data to a single coordinator. Joins that used to exhaust coordinator memory now spread their work — and their memory — across the whole cluster, scaling with node count. The engine **chooses the strategy by cost** (broadcast, hash-shuffle, or coordinator-centric) per join, it's transparent to the query author, and it's validated end-to-end against TPC-H. Flip it on with a single setting.
 
-[IMAGE: Hero diagram. Left: the old world — three table scans all funnel into one coordinator node that holds the entire join (node glowing red, "all join state here"). Right: the new world — the same query as a staged DAG fanned across 3 data nodes, each owning a slice, with only a thin arrow returning a small final result to the coordinator. The contrast "centralized vs. parallel" should read in one glance.]
+<!-- FIGURE: Hero. Left: the old world — three table scans all funnel into one coordinator node that holds the entire join. Right: the new world — the same query as a staged DAG fanned across 3 data nodes, each owning a slice, with only a thin arrow returning a small final result. Contrast "centralized vs. parallel" should read in one glance. -->
+![Centralized vs. parallel: the old world funnels three scans into one coordinator holding the entire join; the new world spreads the join across data nodes, returning only a small result](blog-figures/02-hero.png)
 
 ---
 
@@ -35,7 +36,8 @@ Here's the memory math that makes it concrete. Suppose a join's build side needs
 
 That gap — aggregate cluster memory that the old model couldn't use — is the wall this feature removes.
 
-[IMAGE: "Before" plan tree for a 3-way join, annotated so both inputs of every join gather to a single COORDINATOR node; red highlight on the coordinator labelled "entire join + all intermediates live here." This is the picture §3 will transform.]
+<!-- FIGURE: "Before" plan tree for a 3-way join — both inputs of every join gather to a single COORDINATOR node; red highlight labelled "entire join + all intermediates live here." This is the picture §3 transforms. -->
+![Coordinator-centric 3-way join: every scan gathers up into one node that holds the entire join and all intermediates](blog-figures/03-before-tree.png)
 
 ---
 
@@ -53,7 +55,8 @@ There are three exchanges, and almost everything else is built from them:
 
 An exchange is a **stage boundary**: the engine cuts the plan there and schedules the child stage on its own set of nodes. A join over two hash-shuffles becomes a *worker tier* — a stage that runs the join in parallel, one partition per worker. Chain those tiers and you have a distributed multi-way join.
 
-[IMAGE: Three small schematics side by side — Gather (funnel), Broadcast (fan-out replicate), Hash-shuffle (crossbar repartition by key) — each with a one-line caption. This is the visual vocabulary for the rest of the post.]
+<!-- FIGURE: Three small schematics side by side — Gather (funnel), Broadcast (fan-out replicate), Hash-shuffle (crossbar repartition by key) — each with a one-line caption. The visual vocabulary for the rest of the post. -->
+![The three exchanges — Gather (N→1, funnel to coordinator), Broadcast (1→N, replicate the small build), Hash-shuffle (M→N, repartition by join key)](blog-figures/01-three-exchanges.png)
 
 ---
 
@@ -84,7 +87,8 @@ Watch what happens to it.
 
 **Step 5 — Execution.** Producers stream their partitions over the shuffle transport; each worker buffers its key bucket, joins, partially aggregates, and ships its partials; the coordinator merges only the (tiny) grouped result.
 
-[IMAGE: The centerpiece figure — a 4-panel "plan evolution" strip for THIS query: (1) logical tree, (2) same tree annotated with the cost-chosen strategy per join, (3) tree with exchanges inserted (HASH_SHUFFLE(orderkey), HASH_SHUFFLE(custkey), PARTIAL/FINAL split, GATHER), (4) the staged DAG colored by where each stage runs. This single figure should carry the whole post.]
+<!-- FIGURE: Centerpiece — a 4-panel "plan evolution" strip for THIS query: (1) logical tree, (2) cost-chosen strategy per join, (3) exchanges inserted (HASH_SHUFFLE orderkey/custkey, PARTIAL/FINAL split, GATHER), (4) the staged DAG colored by where each stage runs. This single figure carries the whole post. -->
+![Plan evolution in four views: the logical tree, the cost-chosen strategy per join, exchanges placed (hash-shuffle on orderkey and custkey, PARTIAL/FINAL aggregate split, gather), and the staged DAG banded by coordinator / worker tiers / data nodes](blog-figures/04-plan-evolution.png)
 
 The result is identical to what the coordinator-centric path would have produced — but the two joins and the partial aggregation never touched a single bottleneck node.
 
@@ -98,7 +102,8 @@ A purely rule-based planner ("shuffle if both sides are tables, broadcast if one
 
 Placement then runs as a **separate pass** over the cost-chosen plan. Why two phases instead of one? The cost optimizer works bottom-up and, by construction, resolves each join to a single "everything on the coordinator" answer first — it reasons about *strategy*, not *layout*. So a second top-down pass re-derives the actual layout: it threads each operator's required data distribution down the tree and inserts an exchange only where a child can't already satisfy it. That separation is what lets arbitrary join depth, mixed key patterns, and odd tree shapes all work through one mechanism, with no per-query-shape special casing.
 
-[IMAGE: A pipeline strip — "row counts → cost model ranks strategies per join → top-down exchange-placement pass → staged DAG → dispatch." Five boxes, left to right. Keep it light; the depth is in the prose.]
+<!-- FIGURE: A pipeline strip — row counts → cost ranks strategies per join → top-down exchange-placement pass → staged DAG → dispatch. Five boxes, left to right; depth is in the prose. -->
+![Pipeline: real row counts feed a cost model that ranks a strategy per join, then a separate top-down exchange-placement pass inserts exchanges only where needed, the plan is cut into a staged DAG, and dispatched — cost decides, then algebra places](blog-figures/05-cost-pipeline.png)
 
 ---
 
@@ -111,7 +116,8 @@ All four shapes come out of the same machinery:
 - **Hash-shuffle / multi-way cascade** — co-partition both sides on the join key; chain a worker tier per join for multi-way queries (inner, outer, and mixed-key).
 - **Distributed aggregation over a join** — run `PARTIAL` on the join's worker tier (per partition), then a small `FINAL` merge on the coordinator. This is the Q5/Q10 shape from §3.
 
-[IMAGE: A 2×2 of miniature DAGs, one per strategy, so a reader can pattern-match their own query shape to a strategy at a glance.]
+<!-- FIGURE: A 2×2 of miniature DAGs, one per strategy, so a reader can pattern-match their own query shape to a strategy at a glance. -->
+![Four strategies as miniature DAGs: coordinator-centric (gather both sides), broadcast (replicate the small side), hash-shuffle cascade (a worker tier per join), and distributed aggregation over a join (PARTIAL on workers, FINAL on the coordinator)](blog-figures/06-strategies-2x2.png)
 
 ---
 
@@ -123,7 +129,8 @@ Most distributed-SQL systems are designed as distributed engines from the first 
 
 In a disaggregated system the scheduler can put any scan anywhere. Here, a scan must run where its shard lives. The engine honors this with a strict rule: **one scan per stage**, with each fragment resolving its execution targets from its shard. That constraint shapes the whole DAG-cutting logic — stages are built around where data already is, and the shuffle tiers are layered on top of those shard-local producers rather than replacing them.
 
-[IMAGE: A small figure showing shard-pinned scan stages at the bottom (locked to their nodes) and a freely-placeable shuffle worker tier above them — "data is fixed, computation moves to a tier above it."]
+<!-- FIGURE: Shard-pinned scan stages at the bottom (locked to their nodes) and a freely-placeable shuffle worker tier above them — "data is fixed, computation moves to a tier above it." -->
+![Shard-pinned scans locked inside their data nodes at the bottom; a freely-placeable shuffle worker tier above them — data is fixed, computation moves to a tier above it](blog-figures/07-shard-pinning.png)
 
 ### 6.2 Broadcast is an instruction, not a stage
 
@@ -131,7 +138,8 @@ The textbook treatment makes broadcast its own exchange/stage. That breaks under
 
 The resolution: treat broadcast as an **instruction attached to a stage** rather than a stage of its own. The engine captures the small build side once, then *injects* it into whatever stage consumes it — which is free to also be a shuffle producer. It's a small reframing that dissolves a whole class of "this stage needs to be two things" problems, and it's a design point our constraints forced rather than one we'd have reached on disaggregated storage.
 
-[IMAGE: Before/after of one stage — left: an illegal stage trying to be both "broadcast probe" and "shuffle producer"; right: the same stage as a shuffle producer with a small "broadcast build injected here" tag. Caption: "broadcast rides along as data, not as a second role."]
+<!-- FIGURE: Before/after of one stage — left: an illegal stage trying to be both "broadcast probe" and "shuffle producer"; right: the same stage as a shuffle producer with a small "broadcast build injected here" tag. Caption: "broadcast rides along as data, not as a second role." -->
+![Broadcast as an instruction: on the left, one stage illegally tries to be both broadcast probe and shuffle producer; on the right, the same stage stays a plain shuffle producer with the captured build injected as an instruction — broadcast rides along as data, not a second role](blog-figures/08-broadcast-instruction.png)
 
 ### 6.3 Moving the data: two transports, one consumer contract
 
@@ -141,7 +149,8 @@ Coordinator-centric and broadcast traffic ride **Arrow Flight**; hash-shuffle ri
 
 The headline memory win is locality (the 1/N hash table from §1). But shuffle *intermediates* can still exceed a node's on-heap budget, so the engine bounds each node's live shuffle bytes and supports **opt-in disk spill**: the per-query on-heap footprint stays under budget, the overflow streams to local disk, and the consumer drains spilled chunks back in arrival order before the in-memory tail — preserving the same buffer-all contract, just backed by disk. [VERIFY: name the exact settings + defaults — spill is off by default; node on-heap budget is a percent of heap; there's a disk ceiling.]
 
-[IMAGE: Memory diagram — one node holding the whole hash table (red, above the heap line) vs. N nodes each holding ~1/N (green, under the line); a small inset showing the on-heap budget with overflow arrowed to disk.]
+<!-- FIGURE: Memory diagram — one node holding the whole hash table (red, above the heap line) vs. N nodes each holding ~1/N (green, under the line); a small inset showing the on-heap budget with overflow arrowed to disk. -->
+![Memory: one node's 16 GiB hash table busts the heap limit, while eight nodes each hold ~2 GiB comfortably under it; an inset shows the on-heap shuffle budget with overflow spilling to local disk](blog-figures/09-memory-spill.png)
 
 ---
 
