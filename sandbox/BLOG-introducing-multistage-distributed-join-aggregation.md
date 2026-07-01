@@ -332,7 +332,7 @@ source = fact
 
 ---
 
-## 10. Limitations and what's next
+## 10. Limitations
 
 Honest scoping for operators:
 
@@ -344,16 +344,35 @@ Honest scoping for operators:
 
 > Note: outer / semi / anti and mixed-key multi-way joins, and bushy trees, are **handled** — they fall out of the same distribution algebra with no per-shape code (one of the payoffs of the cost-then-algebra design in §4).
 
-**Roadmap.**
+---
 
-- **Generalize the shuffle transport to an arbitrary M→N consumer** — the keystone. It unlocks worker-parallel `FINAL` aggregation and lets broadcast be placed anywhere, closing the two execution-layer gaps above in one move.
-- **Re-enable cost-chosen broadcast on the general path** once the transport above can run a broadcast in any position (no per-shape special-casing).
+## 11. Future optimizations
+
+The current path is correct and, at scale, already faster than coordinator-centric (§7). The work below is about closing the remaining latency and capacity gaps — most of it aimed at the `HASH_SHUFFLE` join, which is where the heaviest queries spend their time.
+
+*Execution engine (native backend).*
+
+- **Introduce DataFusion's `SortMergeJoinExec` for large × large joins.** The worker join is a `HashJoinExec` today, whose build side must fit in memory — which is exactly what trips the non-spillable-build failures on q17/q18/q21 (§7). A sort-merge join streams both already-partitioned sides and spills, so it clears those queries where the hash build cannot. DataFusion ships the operator; the backend just needs to select it (by cost, or by a build-size threshold) instead of always hashing.
+- **Raise the worker join's intra-node parallelism.** The `df_set_reduce_target_partitions` FFM setter already exists (default `4`, clamped `[1, 32]`) — it's the closest analog to Spark's per-node join parallelism. Today it tunes coordinator-reduce sessions; extending it to the worker join session would parallelize the join across a many-core host's CPUs *without* adding shuffle buffers. Low-risk and measurable first, since the plumbing is already there.
+
+*Shuffle transport.*
+
+- **Generalize the shuffle transport to an arbitrary M→N consumer** — the keystone. It unlocks worker-parallel `FINAL` aggregation (§10) and lets broadcast be placed anywhere, closing the two execution-layer gaps in §10 in one move.
+- **Pipeline the consumer (relax buffer-all).** The consumer buffers every chunk on heap until both sides report `isLast`, then drains — a hard barrier (see §6.4). A hash join genuinely needs its *build* side complete, but the *probe* side can stream and the build hash table can be filled incrementally as chunks arrive, overlapping network with compute. Biggest single win, biggest effort (tangled with the spill-correctness design), so it's a follow-up rather than a quick one.
+- **Native-to-native shuffle.** Each shuffle chunk round-trips through a Java `VectorSchemaRoot` (import → serialize → … → deserialize → export), crossing the Arrow C-data boundary twice. Handing the Arrow IPC straight to DataFusion's native reader skips the Java hop entirely — the cleanest long-term shape, and a large change.
+- **Coalesce batches before serialize.** Merging small record batches into fewer, larger ones before the IPC write cuts the per-chunk fixed cost (compression init, IPC framing, C-data export, RPC) — low effort, modest win, and it also amortizes compression setup.
+- **Compress only large buffers.** When compression is on it runs on every buffer, including the thousands of tiny validity/offset buffers where it costs more than it saves. A size threshold in the codec (pass-through below N bytes) recovers most of the compression-added latency while keeping the heap benefit on the buffers that matter.
+
+*Cost model & planning.*
+
+- **Re-enable cost-chosen broadcast on the general path** once the transport above can run a broadcast in any position (no per-shape special-casing). For the star-schema joins (q5/q9 against `nation`/`region`/`supplier`) this avoids shuffling the fact table at all.
+- **A realistic `distribute.min_rows` floor.** The benchmark clusters set it to `1` to force every join through the distributed path for coverage; a production floor would keep medium joins coordinator-centric (fast, like the baseline) and reserve shuffle for the genuinely-too-big ones.
 - **Cross-backend coordinator joins** — admit a coordinator-only join backend whose inputs come from different backends.
 - **Richer cost statistics** — beyond per-index row counts, toward selectivity/NDV-aware estimates for sharper per-join strategy choices.
 
 ---
 
-## 11. Try it
+## 12. Try it
 
 Multi-stage distributed join and aggregation turns the cluster's *aggregate* memory and CPU into usable capacity for analytical joins. Queries that used to overwhelm a single coordinator now scale out across nodes; the strategy is chosen for you by cost; and the whole thing sits behind one runtime setting you can turn on — and off — at will.
 
