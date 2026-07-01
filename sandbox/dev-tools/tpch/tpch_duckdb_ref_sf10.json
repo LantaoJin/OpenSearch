@@ -1,0 +1,327 @@
+{
+  "1": {
+    "rows": 4,
+    "took": 1.0800132751464844,
+    "first": {
+      "l_returnflag": "A",
+      "l_linestatus": "F",
+      "sum_qty": 377518399.0,
+      "sum_base_price": 566065727797.25,
+      "sum_disc_price": 537759104278.0656,
+      "sum_charge": 559276670892.1168,
+      "avg_qty": 25.500975103007097,
+      "avg_price": 38237.15100895854,
+      "avg_disc": 0.0500065745402432,
+      "count_order": 14804077
+    },
+    "cols": [
+      "l_returnflag",
+      "l_linestatus",
+      "sum_qty",
+      "sum_base_price",
+      "sum_disc_price",
+      "sum_charge",
+      "avg_qty",
+      "avg_price",
+      "avg_disc",
+      "count_order"
+    ]
+  },
+  "2": {
+    "rows": 100,
+    "took": 0.16365385055541992,
+    "first": {
+      "s_acctbal": 9994.37,
+      "s_name": "Supplier#000030084",
+      "n_name": "GERMANY",
+      "p_partkey": 380077,
+      "p_mfgr": "Manufacturer#5",
+      "s_address": "Lpmw8Ht4rC,xjMQ0p50CkyG7764",
+      "s_phone": "17-519-171-6883",
+      "s_comment": "thely express instructions. regular hockey players was furiously. quickly pendi"
+    },
+    "cols": [
+      "s_acctbal",
+      "s_name",
+      "n_name",
+      "p_partkey",
+      "p_mfgr",
+      "s_address",
+      "s_phone",
+      "s_comment"
+    ]
+  },
+  "3": {
+    "rows": 10,
+    "took": 0.4866294860839844,
+    "first": {
+      "l_orderkey": 4791171,
+      "revenue": 440715.2185,
+      "o_orderdate": "1995-02-23 00:00:00",
+      "o_shippriority": 0
+    },
+    "cols": [
+      "l_orderkey",
+      "revenue",
+      "o_orderdate",
+      "o_shippriority"
+    ]
+  },
+  "4": {
+    "rows": 5,
+    "took": 0.2920522689819336,
+    "first": {
+      "o_orderpriority": "1-URGENT",
+      "order_count": 105214
+    },
+    "cols": [
+      "o_orderpriority",
+      "order_count"
+    ]
+  },
+  "5": {
+    "rows": 5,
+    "took": 0.5181167125701904,
+    "first": {
+      "n_name": "INDIA",
+      "revenue": 536862587.9995
+    },
+    "cols": [
+      "n_name",
+      "revenue"
+    ]
+  },
+  "6": {
+    "rows": 1,
+    "took": 0.26523256301879883,
+    "first": {
+      "revenue": 1230113636.0101
+    },
+    "cols": [
+      "revenue"
+    ]
+  },
+  "7": {
+    "rows": 4,
+    "took": 0.46279215812683105,
+    "first": {
+      "supp_nation": "FRANCE",
+      "cust_nation": "GERMANY",
+      "l_year": 1995,
+      "revenue": 521960141.7003
+    },
+    "cols": [
+      "supp_nation",
+      "cust_nation",
+      "l_year",
+      "revenue"
+    ]
+  },
+  "8": {
+    "rows": 2,
+    "took": 0.5687947273254395,
+    "first": {
+      "o_year": 1995.0,
+      "mkt_share": 0.0388201425143322
+    },
+    "cols": [
+      "o_year",
+      "mkt_share"
+    ]
+  },
+  "9": {
+    "rows": 175,
+    "took": 1.0341782569885254,
+    "first": {
+      "nation": "ALGERIA",
+      "o_year": 1998,
+      "sum_profit": 271504046.5508
+    },
+    "cols": [
+      "nation",
+      "o_year",
+      "sum_profit"
+    ]
+  },
+  "10": {
+    "rows": 20,
+    "took": 1.0321531295776367,
+    "first": {
+      "c_custkey": 1237537,
+      "c_name": "Customer#001237537",
+      "revenue": 884989.6657,
+      "c_acctbal": 7840.17,
+      "n_name": "RUSSIA",
+      "c_address": "mdkU4LpZECCtt20RHa76sA6b4WC",
+      "c_phone": "32-367-120-4327",
+      "c_comment": "yly regular accounts boost. requests need to nag evenly"
+    },
+    "cols": [
+      "c_custkey",
+      "c_name",
+      "revenue",
+      "c_acctbal",
+      "n_name",
+      "c_address",
+      "c_phone",
+      "c_comment"
+    ]
+  },
+  "11": {
+    "rows": 0,
+    "took": 0.12223196029663086,
+    "first": null,
+    "cols": [
+      "ps_partkey",
+      "value"
+    ]
+  },
+  "12": {
+    "rows": 2,
+    "took": 0.29145359992980957,
+    "first": {
+      "l_shipmode": "MAIL",
+      "high_line_count": 62071.0,
+      "low_line_count": 93045.0
+    },
+    "cols": [
+      "l_shipmode",
+      "high_line_count",
+      "low_line_count"
+    ]
+  },
+  "13": {
+    "rows": 45,
+    "took": 0.6684091091156006,
+    "first": {
+      "c_count": 0,
+      "custdist": 500019
+    },
+    "cols": [
+      "c_count",
+      "custdist"
+    ]
+  },
+  "14": {
+    "rows": 1,
+    "took": 0.4250211715698242,
+    "first": {
+      "promo_revenue": 16.647594941615097
+    },
+    "cols": [
+      "promo_revenue"
+    ]
+  },
+  "15": {
+    "rows": 1,
+    "took": 0.2990152835845947,
+    "first": {
+      "s_suppkey": 69998,
+      "s_name": "Supplier#000069998",
+      "s_address": "117W54YtKASNfzkZRS8P32856BMj0HKf895vdukw",
+      "s_phone": "16-386-278-9829",
+      "total_revenue": 2194132.8166
+    },
+    "cols": [
+      "s_suppkey",
+      "s_name",
+      "s_address",
+      "s_phone",
+      "total_revenue"
+    ]
+  },
+  "16": {
+    "rows": 27840,
+    "took": 0.24182343482971191,
+    "first": {
+      "p_brand": "Brand#44",
+      "p_type": "STANDARD PLATED TIN",
+      "p_size": 9,
+      "supplier_cnt": 120
+    },
+    "cols": [
+      "p_brand",
+      "p_type",
+      "p_size",
+      "supplier_cnt"
+    ]
+  },
+  "17": {
+    "rows": 1,
+    "took": 0.5191433429718018,
+    "first": {
+      "avg_yearly": 3295493.512857143
+    },
+    "cols": [
+      "avg_yearly"
+    ]
+  },
+  "18": {
+    "rows": 100,
+    "took": 0.7001631259918213,
+    "first": {
+      "c_name": "Customer#001287812",
+      "c_custkey": 1287812,
+      "o_orderkey": 42290181,
+      "o_orderdate": "1997-11-26 00:00:00",
+      "o_totalprice": 558289.17,
+      "sum(l_quantity)": 318.0
+    },
+    "cols": [
+      "c_name",
+      "c_custkey",
+      "o_orderkey",
+      "o_orderdate",
+      "o_totalprice",
+      "sum(l_quantity)"
+    ]
+  },
+  "19": {
+    "rows": 1,
+    "took": 0.6837608814239502,
+    "first": {
+      "revenue": 30104438.0911
+    },
+    "cols": [
+      "revenue"
+    ]
+  },
+  "20": {
+    "rows": 1804,
+    "took": 0.40294742584228516,
+    "first": {
+      "s_name": "Supplier#000000020",
+      "s_address": "JtPqm19E7tF 152Rl1wQZ8j0H"
+    },
+    "cols": [
+      "s_name",
+      "s_address"
+    ]
+  },
+  "21": {
+    "rows": 100,
+    "took": 1.21132230758667,
+    "first": {
+      "s_name": "Supplier#000062538",
+      "numwait": 24
+    },
+    "cols": [
+      "s_name",
+      "numwait"
+    ]
+  },
+  "22": {
+    "rows": 7,
+    "took": 0.4286484718322754,
+    "first": {
+      "cntrycode": "13",
+      "numcust": 9025,
+      "totacctbal": 67592468.28
+    },
+    "cols": [
+      "cntrycode",
+      "numcust",
+      "totacctbal"
+    ]
+  }
+}

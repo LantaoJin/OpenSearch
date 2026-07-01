@@ -1,0 +1,188 @@
+{
+  "1": {
+    "rows": 4,
+    "first": {
+      "l_returnflag": "A",
+      "l_linestatus": "F",
+      "sum_qty": 37734107.0,
+      "sum_base_price": 56586554400.73,
+      "sum_disc_price": 53758257134.87,
+      "sum_charge": 55909065222.82769,
+      "avg_qty": 25.522005853257337,
+      "avg_price": 38273.129734621674,
+      "avg_disc": 0.049985295838397614,
+      "count_order": 1478493
+    }
+  },
+  "2": {
+    "rows": 100,
+    "first": {
+      "s_acctbal": 9938.53,
+      "s_name": "Supplier#000005359",
+      "n_name": "UNITED KINGDOM",
+      "p_partkey": 185358,
+      "p_mfgr": "Manufacturer#4",
+      "s_address": "bgxj2K0w1kJvxYl5mhCfou,W",
+      "s_phone": "33-429-790-6131",
+      "s_comment": "l, ironic instructions cajole"
+    }
+  },
+  "3": {
+    "rows": 10,
+    "first": {
+      "l_orderkey": 2456423,
+      "revenue": 406181.0111,
+      "o_orderdate": "1995-03-05",
+      "o_shippriority": 0
+    }
+  },
+  "4": {
+    "rows": 5,
+    "first": {
+      "o_orderpriority": "1-URGENT",
+      "order_count": 10594
+    }
+  },
+  "5": {
+    "rows": 5,
+    "first": {
+      "n_name": "INDONESIA",
+      "revenue": 55502041.1697
+    }
+  },
+  "6": {
+    "rows": 1,
+    "first": {
+      "revenue": 123141078.2283
+    }
+  },
+  "7": {
+    "rows": 4,
+    "first": {
+      "supp_nation": "FRANCE",
+      "cust_nation": "GERMANY",
+      "l_year": 1995,
+      "revenue": 54639732.7336
+    }
+  },
+  "8": {
+    "rows": 2,
+    "first": {
+      "o_year": 1995,
+      "mkt_share": 0.0344358904066548
+    }
+  },
+  "9": {
+    "rows": 175,
+    "first": {
+      "nation": "ALGERIA",
+      "o_year": 1998,
+      "sum_profit": 27136900.1803
+    }
+  },
+  "10": {
+    "rows": 20,
+    "first": {
+      "c_custkey": 57040,
+      "c_name": "Customer#000057040",
+      "revenue": 734235.2455,
+      "c_acctbal": 632.87,
+      "n_name": "JAPAN",
+      "c_address": "nICtsILWBB",
+      "c_phone": "22-895-641-3466",
+      "c_comment": "ep. blithely regular foxes promise slyly furiously ironic depend"
+    }
+  },
+  "11": {
+    "rows": 1048,
+    "first": {
+      "ps_partkey": 129760,
+      "value": 17538456.86
+    }
+  },
+  "12": {
+    "rows": 2,
+    "first": {
+      "l_shipmode": "MAIL",
+      "high_line_count": 6202,
+      "low_line_count": 9324
+    }
+  },
+  "13": {
+    "rows": 42,
+    "first": {
+      "c_count": 0,
+      "custdist": 50004
+    }
+  },
+  "14": {
+    "rows": 1,
+    "first": {
+      "promo_revenue": 16.380778626395543
+    }
+  },
+  "15": {
+    "rows": 1,
+    "first": {
+      "s_suppkey": 8449,
+      "s_name": "Supplier#000008449",
+      "s_address": "5BXWsJERA2mP5OyO4",
+      "s_phone": "20-469-856-8873",
+      "total_revenue": 1772627.2087
+    }
+  },
+  "16": {
+    "rows": 18314,
+    "first": {
+      "p_brand": "Brand#41",
+      "p_type": "MEDIUM BRUSHED TIN",
+      "p_size": 3,
+      "supplier_cnt": 28
+    }
+  },
+  "17": {
+    "rows": 1,
+    "first": {
+      "avg_yearly": 348406.0542857143
+    }
+  },
+  "18": {
+    "rows": 57,
+    "first": {
+      "c_name": "Customer#000128120",
+      "c_custkey": 128120,
+      "o_orderkey": 4722021,
+      "o_orderdate": "1994-04-07",
+      "o_totalprice": 544089.09,
+      "sum(l_quantity)": 323.0
+    }
+  },
+  "19": {
+    "rows": 1,
+    "first": {
+      "revenue": 3083843.0578
+    }
+  },
+  "20": {
+    "rows": 186,
+    "first": {
+      "s_name": "Supplier#000000020",
+      "s_address": "JtPqm19E7tF 152Rl1wQZ8j0H"
+    }
+  },
+  "21": {
+    "rows": 100,
+    "first": {
+      "s_name": "Supplier#000002829",
+      "numwait": 20
+    }
+  },
+  "22": {
+    "rows": 7,
+    "first": {
+      "cntrycode": "13",
+      "numcust": 888,
+      "totacctbal": 6737713.99
+    }
+  }
+}
