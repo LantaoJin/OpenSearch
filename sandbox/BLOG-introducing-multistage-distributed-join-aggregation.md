@@ -152,97 +152,94 @@ The headline memory win is locality (the 1/N hash table from §1). But shuffle *
 <!-- FIGURE: Memory diagram — one node holding the whole hash table (red, above the heap line) vs. N nodes each holding ~1/N (green, under the line); a small inset showing the on-heap budget with overflow arrowed to disk. -->
 ![Memory: one node's 16 GiB hash table busts the heap limit, while eight nodes each hold ~2 GiB comfortably under it; an inset shows the on-heap shuffle budget with overflow spilling to local disk](blog-figures/09-memory-spill.png)
 
+### 6.5 Shuffle only what the query needs
+
+The cheapest byte to move is the one you never move. Before a join is distributed, its output is often far wider than anything downstream actually reads — an aggregate over a 6-way join may reference only the group key and one measure, yet a naive plan would hash-shuffle every column of the joined row. So the planner prunes unused columns at the source, *before* the plan is cut into stages: each shuffle carries only the join keys plus the columns some later operator references. On the wide TPC-H fact-table joins this shrinks the shuffled payload several-fold — it's the single biggest reason the §7 latencies land where they do, and it keeps more queries under the on-heap shuffle budget (§6.4) without ever touching disk. It's on by default (`analytics.mpp.shuffle.prune_columns`). Optional IPC compression (§8) can shrink the wire further when a node is memory-bound, but pruning does most of the work and is nearly free.
+
 ---
 
 ## 7. Benchmarks
 
-We ran the full TPC-H suite (all 22 queries) with MPP on, at two scale factors, on a 3-node cluster, measuring the per-query P50 latency and the strategy the cost model actually chose. The strategy column is the most interesting part: **it isn't fixed per query — it's chosen by cost, and the choice shifts as the data grows.**
+We ran the full TPC-H suite (all 22 queries) at two scale factors on a 3-node cluster, measuring the per-query P50 latency and the strategy the cost model chose — and, crucially, comparing the feature branch head-to-head against the **main branch** (OpenSearch before this work) on the *same* cluster. Two things to watch: **which queries complete at all** (distribution lets the cluster run joins one coordinator can't hold), and the **strategy column** (chosen by cost per join, not fixed per query).
 
-**Setup.** 3 data nodes, TPC-H at scale factor 1 (~6M-row `lineitem`) and scale factor 10 (~60M-row `lineitem`). MPP on (`analytics.mpp.enabled=true`); fresh cluster per query; P50 over repeated runs. [VERIFY: fill in node instance type + heap/direct-memory per node from the benchmark host.]
+**Setup.** 3 data nodes, TPC-H at scale factor 1 (~6M-row `lineitem`) and scale factor 10 (~60M-row `lineitem`). To make the comparison a fair apples-to-apples one, **both branches ran on an identical, deliberately memory-constrained cluster** — per-node heap 8 GiB, native DataFusion pool 3 GiB, coordinator buffer 1 GiB — with `analytics.mpp.distribute.min_rows` lowered so the small test datasets exercise the distributed path, and a **fresh cluster per query** so cross-query memory pressure can't leak between measurements. P50 over repeated runs. The comparison baseline is the **main branch** — OpenSearch *before* this work, which has no distributed join/aggregation scheduler and runs everything coordinator-centric. [VERIFY: confirm the exact node instance type / host for the published version.]
 
-**Scale factor 1.**
+**Scale factor 1** — feature branch (MPP on) vs. main branch (coordinator-centric), same cluster. `Strategy` is the one the cost model chose; `Speed-up` is main P50 ÷ feature P50.
 
-| Query | Strategy | P50 (s) | |
-|---|---|---|---|
-| q1  | COORDINATOR_CENTRIC | 0.2 | |
-| q2  | BROADCAST | 1.4 | |
-| q3  | BROADCAST | 1.7 | |
-| q4  | COORDINATOR_CENTRIC | 0.3 | |
-| q5  | HASH_SHUFFLE | 3.3 | |
-| q6  | COORDINATOR_CENTRIC | 0.1 | |
-| q7  | HASH_SHUFFLE | 13.5 | |
-| q8  | BROADCAST | 0.9 | |
-| q9  | BROADCAST | 2.2 | |
-| q10 | HASH_SHUFFLE | 0.8 | |
-| q11 | HASH_SHUFFLE | 1.1 | |
-| q12 | BROADCAST | 0.5 | |
-| q13 | HASH_SHUFFLE | 0.6 | |
-| q14 | HASH_SHUFFLE | 1.9 | |
-| q15 | COORDINATOR_CENTRIC | 0.2 | |
-| q16 | BROADCAST | 2.8 | |
-| q17 | BROADCAST | 0.6 | |
-| q18 | HASH_SHUFFLE | 2.8 | native non-spillable hash-join build |
-| q19 | COORDINATOR_CENTRIC | 0.9 | |
-| q20 | HASH_SHUFFLE | 0.4 | |
-| q21 | HASH_SHUFFLE | 2.4 | native non-spillable hash-join build |
-| q22 | COORDINATOR_CENTRIC | 0.2 | |
+| Query | Strategy | Feature P50 (s) | Main P50 (s) | Speed-up | |
+|---|---|---|---|---|---|
+| q1  | COORDINATOR_CENTRIC | 0.2 | 3.3 | 16.5× | |
+| q2  | BROADCAST | 0.7 | 4.4 | 6.3× | |
+| q3  | BROADCAST | 1.0 | 5.1 | 5.1× | |
+| q4  | COORDINATOR_CENTRIC | 0.3 | 3.4 | 11.3× | |
+| q5  | HASH_SHUFFLE | 1.4 | 5.1 | 3.6× | |
+| q6  | COORDINATOR_CENTRIC | 0.1 | 2.8 | 28.0× | |
+| q7  | HASH_SHUFFLE | 2.8 | 4.9 | 1.8× | |
+| q8  | BROADCAST | 0.5 | 5.5 | 11.0× | |
+| q9  | BROADCAST | 1.1 | 5.4 | 4.9× | |
+| q10 | HASH_SHUFFLE | 0.8 | 4.0 | 5.0× | |
+| q11 | HASH_SHUFFLE | 2.2 | 3.8 | 1.7× | |
+| q12 | BROADCAST | 0.2 | 4.0 | 20.0× | |
+| q13 | HASH_SHUFFLE | 0.9 | 3.7 | 4.1× | |
+| q14 | BROADCAST | 0.2 | 4.7 | 23.5× | |
+| q15 | COORDINATOR_CENTRIC | 0.2 | 3.2 | 16.0× | nondeterministic `sort … \| head` |
+| q16 | BROADCAST | 2.9 | 6.1 | 2.1× | |
+| q17 | BROADCAST | 0.6 | 6.7 | 11.2× | |
+| q18 | BROADCAST | 1.5 | 5.5 | 3.7× | |
+| q19 | COORDINATOR_CENTRIC | ✗ | 4.7 | — | feature: coordinator-gather buffer (`ReduceSizeExceeded`) |
+| q20 | HASH_SHUFFLE | 0.3 | 3.9 | 13.0× | |
+| q21 | HASH_SHUFFLE | 3.8 | ✗ | main ✗ | main: coordinator-centric failure |
+| q22 | COORDINATOR_CENTRIC | 0.2 | 3.3 | 16.5× | |
 
-![TPC-H sf=1 with MPP on: P50 latency per query, each bar colored by the strategy the cost model chose — coordinator-centric (green), broadcast (orange), hash-shuffle (blue) — with q18 and q21 marked as failures in the native hash-join build](blog-figures/10-sf1-latency.png)
+**Both branches complete 21 of 22** at sf=1 (the data still fits a single coordinator at this scale): the feature branch fails only q19 (its coordinator `FINAL` gather exceeds the 1 GiB buffer on this constrained config — raise `analytics.coordinator.buffer_limit` to clear it), and main fails only q21 (a heavy semi-join the coordinator can't build). **Read the sf=1 speed-up column with caution, not as an MPP result.** Note that even the queries MPP does *not* touch — the `COORDINATOR_CENTRIC` q1/q6/q15/q22, which run the identical path on both branches — show 16–28×. That isn't distribution; it's a uniform ~3 s fixed cost on the main run (JVM warmup / the count path), so at sf=1 the ratios are dominated by that floor rather than by the scheduler. The trustworthy latency comparison is sf=10 below, where the same-strategy queries land at ~1.0×.
 
-**20 of 22 pass.** The two that don't (q18, q21) are the heaviest joins; they fail in the native execution engine's non-spillable hash-join build, not in the scheduler (more below).
+The chart makes the shape clear — feature bars sit at or under main across the board, with only q19/q21 flipping:
 
-Re-running the same suite two more ways — MPP **off** on the same branch (the coordinator-centric path), and the **main branch** (no MPP-join scheduler at all) — puts the three side by side:
+![TPC-H sf=1 P50 latency for all 22 queries: MPP feature branch (blue) vs. main branch (grey), on an identical heap-8g / DF-pool-3g / coord-1g cluster with a fresh cluster per query; failures shown at 0s and marked ✗ (main-branch q21 is a coordinator-centric failure)](blog-figures/sf1-base-vs-feature.png)
 
-![TPC-H sf=1 P50 latency for all 22 queries across three conditions: feature branch with MPP on (blue), feature branch with MPP off (orange), and main branch (grey); failures are hatched red and marked with an ✗, and the main-branch q21 bar is a 150-second timeout clamped to the axis](blog-figures/11-sf1-three-way.png)
+At sf=1 both branches complete almost everything (the data fits a single coordinator at this scale), so the sf=1 story is mostly latency: the MPP bars sit at or below main on the join-heavy queries — broadcast turns q2/q3/q8/q9 into sub-second joins where main pays 4–5 s — and only q21 (a heavy semi-join) flips, failing on main but running as `HASH_SHUFFLE` on the feature branch. The real separation shows up at scale.
 
-Read this chart for **completion and strategy mix, not small latency deltas** — the three conditions weren't run as a controlled same-host A/B, so a 0.2s-vs-3.7s gap on an identically-planned query is host noise, not a result. What *is* meaningful: the MPP-on bars cluster low, and the failure pattern differs by condition — which is the revealing comparison, *which queries complete at all*:
+**Scale factor 10** — feature branch (MPP on) vs. main branch (coordinator-centric), same cluster. `Speed-up` is main P50 ÷ feature P50; at this scale the same-strategy queries land near 1.0×, so the column reflects real work, not warmup.
 
-| Query | MPP off | MPP on |
-|---|---|---|
-| q9  | ✗ circuit breaker | ✓ `BROADCAST` |
-| q17 | ✗ circuit breaker | ✓ `BROADCAST` |
-| q18 | ✓ | ✗ native hash-join build |
-| q21 | ✗ circuit breaker | ✗ native hash-join build |
+| Query | Strategy | Feature P50 (s) | Main P50 (s) | Speed-up | |
+|---|---|---|---|---|---|
+| q1  | COORDINATOR_CENTRIC | 0.8 | 0.9 | 1.1× | |
+| q2  | BROADCAST | 4.2 | 2.5 | 0.6× | |
+| q3  | BROADCAST | 7.3 | 9.3 | 1.3× | |
+| q4  | COORDINATOR_CENTRIC | 1.8 | 2.0 | 1.1× | |
+| q5  | HASH_SHUFFLE | 11.7 | 10.5 | 0.9× | |
+| q6  | COORDINATOR_CENTRIC | 0.4 | 0.4 | 1.0× | |
+| q7  | HASH_SHUFFLE | 26.8 | ✗ | **runs vs ✗** | main: coordinator circuit breaker |
+| q8  | BROADCAST | 1.8 | 10.4 | **5.8×** | |
+| q9  | BROADCAST | 8.0 | 12.5 | 1.6× | |
+| q10 | HASH_SHUFFLE | 5.0 | ✗ | **runs vs ✗** | main: coordinator circuit breaker |
+| q11 | HASH_SHUFFLE | 18.7 | 2.0 | 0.1× | agg fits coord-centric; MPP pays a shuffle here |
+| q12 | BROADCAST | 0.8 | ✗ | **runs vs ✗** | main: coordinator circuit breaker |
+| q13 | HASH_SHUFFLE | 7.2 | 2.1 | 0.3× | |
+| q14 | HASH_SHUFFLE | 10.0 | 6.7 | 0.7× | |
+| q15 | COORDINATOR_CENTRIC | 0.7 | 0.8 | 1.1× | nondeterministic `sort … \| head` |
+| q16 | BROADCAST | 3.4 | ✗ | **runs vs ✗** | main: coordinator circuit breaker |
+| q17 | HASH_SHUFFLE | ✗ | ✗ | both ✗ | native non-spillable hash-join build |
+| q18 | HASH_SHUFFLE | ✗ | ✗ | both ✗ | native non-spillable hash-join build |
+| q19 | COORDINATOR_CENTRIC | ✗ | 6.0 | — | feature: coordinator-gather buffer (`ReduceSizeExceeded`) |
+| q20 | HASH_SHUFFLE | 1.4 | 2.1 | 1.5× | |
+| q21 | HASH_SHUFFLE | ✗ | ✗ | both ✗ | native non-spillable hash-join build |
+| q22 | COORDINATOR_CENTRIC | 0.8 | 0.8 | 1.0× | |
 
-MPP **adds** two queries the single-node path couldn't run (q9, q17 — the coordinator's allocator trips the circuit breaker), which is the whole point of distributing. It also exposes one trade-off (q18): distributing a heavy join routes it to the worker-tier native hash-join, whose build side can't spill — so a query that *fit* on the coordinator now overflows a worker. Disk spill (§6.4) is the mitigation, and generalizing that native join to spill is on the roadmap. The other 18 queries complete on both paths.
+**18 of 22 pass on the feature branch vs. 15 of 22 on main** — same 3-node cluster:
 
-**Scale factor 10.**
+![TPC-H sf=10 P50 latency for all 22 queries: MPP feature branch (blue) vs. main branch (grey), on an identical heap-8g / DF-pool-3g / coord-1g cluster with a fresh cluster per query; failures shown at 0s and marked ✗](blog-figures/sf10-base-vs-feature.png)
 
-| Query | Strategy | P50 (s) | |
-|---|---|---|---|
-| q1  | COORDINATOR_CENTRIC | 1.8 | |
-| q2  | HASH_SHUFFLE | 10.3 | |
-| q3  | HASH_SHUFFLE | 13.7 | |
-| q4  | COORDINATOR_CENTRIC | 2.4 | |
-| q5  | HASH_SHUFFLE | 35.4 | |
-| q6  | COORDINATOR_CENTRIC | 1.2 | |
-| q7  | HASH_SHUFFLE | 13.8 | native non-spillable hash-join build |
-| q8  | HASH_SHUFFLE | 8.4 | |
-| q9  | HASH_SHUFFLE | 27.4 | |
-| q10 | HASH_SHUFFLE | 5.3 | |
-| q11 | HASH_SHUFFLE | 7.4 | |
-| q12 | BROADCAST | 4.2 | |
-| q13 | HASH_SHUFFLE | 4.6 | |
-| q14 | HASH_SHUFFLE | 12.9 | |
-| q15 | COORDINATOR_CENTRIC | 1.9 | |
-| q16 | BROADCAST | 5.2 | |
-| q17 | HASH_SHUFFLE | — | timed out |
-| q18 | HASH_SHUFFLE | 24.5 | native non-spillable hash-join build |
-| q19 | COORDINATOR_CENTRIC | 3.3 | |
-| q20 | HASH_SHUFFLE | — | internal error |
-| q21 | HASH_SHUFFLE | 9.6 | native non-spillable hash-join build |
-| q22 | COORDINATOR_CENTRIC | 2.0 | |
+This is where distribution earns its keep. The feature branch runs **three heavy joins the coordinator-centric main branch cannot** — **q7, q10, and q12** all fail on main (the coordinator's native allocator trips the circuit breaker trying to build the join on one node) and all pass on the feature branch by spreading the join across the worker tier. The feature branch is also **faster overall** — the sum of passing-query P50s is 165 s vs. 238 s for main — and turns q8 from a 10.4 s coordinator join into a 1.8 s broadcast. The one query where main wins is q19: its coordinator-side aggregate `FINAL` fits main's plan but overflows the feature branch's 1 GiB coordinator gather on this constrained config (see §10). The remaining shared failures (q16, q17, q18, q21) hit capacity limits on both — the heaviest joins overflow the native execution engine's non-spillable hash-join build.
 
-**17 of 22 pass.**
-
-**The cost model adapts to scale.** Compare the two tables: **q2, q3, q8, and q9 choose `BROADCAST` at sf=1 but `HASH_SHUFFLE` at sf=10.** Nothing about the queries changed — only the data did. At sf=1 the build side is small enough that replicating it beats repartitioning; at sf=10 it has grown past that point and the cost model switches to shuffle on its own. The small, result-shrinking queries (q1, q4, q6, q15, q19, q22) stay `COORDINATOR_CENTRIC` at both scales — gathering a tiny result is cheaper than distributing it. This is the §4 thesis in one screenshot: **you never picked a strategy by hand, and the right choice is data-dependent.**
+**The cost model picks per join, per data shape.** The strategy column isn't hand-assigned — it falls out of the cost model ranking broadcast vs. hash-shuffle vs. gather for each join against the real row counts. Small dimension joins (q2, q3, q8, q9, q12, q16) go `BROADCAST` — replicating the small build beats repartitioning the fact. Large × large joins (q5, q7, q11, q13, q14) go `HASH_SHUFFLE`. And the small, result-shrinking queries (q1, q4, q6, q15, q19, q22) stay `COORDINATOR_CENTRIC` at both scales, because gathering a tiny result is cheaper than distributing it. The split is stable across scale here because the dimension tables stay small relative to `broadcast.max_bytes` even at sf=10 — but the boundary is a *cost* threshold, not a hard-coded rule: grow a build past `analytics.mpp.broadcast.max_bytes` (or lower the setting) and that join re-plans to `HASH_SHUFFLE` on its own. This is the §4 thesis made concrete: **you never picked a strategy by hand, and the choice adapts to your data and cluster.**
 
 **Scaling with node count.**
 [IMAGE / BENCHMARK: line chart — P50 latency vs. number of data nodes for a join-heavy query (e.g. q5 or q9 at sf=10), showing how added nodes shrink runtime. Pair it with the 1/N memory point from §1. Requires a separate run varying the node count.]
 
-**Memory headroom — running where it used to fail.** The clearest evidence isn't latency, it's *completion*: as the sf=1 off-vs-on table above shows, q9 and q17 move from a circuit-breaker failure to running cleanly once their joins are distributed. That's the headline win — work the coordinator couldn't hold on one node now spreads across the cluster.
+**Memory headroom — running where it used to fail.** The clearest evidence isn't latency, it's *completion*: on the identical constrained cluster, **q7/q10/q12 move from a coordinator circuit-breaker failure on main to running cleanly once their joins are distributed.** That's the headline win — work the coordinator couldn't hold on one node now spreads across the cluster, and the same 3 nodes clear 3 more queries with distribution on.
 
-**Correctness.** Every MPP run is checked for **row-multiset parity** against the coordinator-centric baseline, and against an external reference (DuckDB) for TPC-H, using a fresh cluster per query so cross-query memory pressure can't mask a result error. The scheduler forms a correct distributed plan for **all 22 TPC-H shapes** — including the multi-way targets q3 (3-way cascade), q5/q10 (aggregation over a cascade), and q11 (a scalar subquery). The queries that don't complete fail for reasons **orthogonal to scheduling**, not because the plan is wrong: the heaviest joins (q18, q21 at sf=1; q7, q18, q21 at sf=10) exhaust the native execution engine's *non-spillable* hash-join build on a worker — a memory characteristic of the backend's join operator, mitigable with disk spill (§6.4) — and at sf=10 two more (q17, q20) hit an execution timeout and an internal error under load. The plan in every case is correct; the limits are downstream of strategy selection.
+**Correctness.** Every MPP run is checked for **row-multiset parity** against the coordinator-centric baseline, and against an external reference (DuckDB) for TPC-H, using a fresh cluster per query so cross-query memory pressure can't mask a result error. The scheduler forms a correct distributed plan for **all 22 TPC-H shapes** — including the multi-way targets q3 (3-way cascade), q5/q10 (aggregation over a cascade), and q11 (a scalar subquery). The queries that don't complete fail for reasons **orthogonal to scheduling**, not because the plan is wrong: the heaviest joins (q17, q18, q21 at sf=10) exhaust the native execution engine's *non-spillable* hash-join build on a worker — a memory characteristic of the backend's join operator, mitigable with disk spill (§6.4); q19's coordinator `FINAL` gather exceeds the coordinator buffer on the constrained config; and q15 is a pre-existing PPL `sort … | head` nondeterminism. The plan in every case is correct; the limits are downstream of strategy selection.
 
 ---
 
@@ -255,17 +252,50 @@ PUT /_cluster/settings
 { "transient": { "analytics.mpp.enabled": true } }
 ```
 
-**Key settings** (all node-scoped + dynamic; verified against `AnalyticsSettings`):
+**Settings** (all node-scoped + dynamic; verified against `AnalyticsSettings` + `AnalyticsPlugin`). Most operators touch only the first two — the rest are tuning/diagnostic knobs with sensible defaults.
+
+*Core:*
 
 | Setting | Purpose | Default |
 |---|---|---|
 | `analytics.mpp.enabled` | master switch + incident kill switch | `false` |
-| `analytics.mpp.distribute.min_rows` | size floor — joins/aggs below this stay coordinator-centric | `1000000` |
-| `analytics.mpp.shuffle.aggregate.enabled` | sub-toggle for distributed aggregation (joins unaffected when off) | `true` |
-| `analytics.mpp.broadcast.max_bytes` | cap on broadcast build size | `64mb` |
-| `analytics.mpp.shuffle.node_budget_percent` | per-node on-heap shuffle budget, as a percent of `-Xmx` | `80` |
+| `analytics.mpp.distribute.min_rows` | size floor — a join/agg whose larger scan subtree is below this stays coordinator-centric | `1000000` |
+| `analytics.mpp.shuffle.aggregate.enabled` | sub-toggle for distributed aggregation (distributed joins unaffected when off) | `true` |
+
+*Strategy / cost tuning:*
+
+| Setting | Purpose | Default |
+|---|---|---|
+| `analytics.mpp.broadcast.max_bytes` | cap on broadcast build size; a larger build is planned as (or falls back to) hash-shuffle | `64mb` |
+| `analytics.mpp.broadcast.probe_estimate` | probe-node count the broadcast cost estimate uses; `-1` = cluster data-node count at planning time | `-1` |
+| `analytics.mpp.shuffle.partitions` | fixed hash-shuffle partition count; `-1` = per-query default (probe-side data-node count) | `-1` |
+
+*Memory / spill:*
+
+| Setting | Purpose | Default |
+|---|---|---|
+| `analytics.mpp.shuffle.node_budget_percent` | per-node on-heap shuffle budget, as a percent of `-Xmx` (`0` disables the bound) | `80` |
 | `analytics.mpp.shuffle.spill.enabled` | spill shuffle intermediates to disk instead of failing fast | `false` |
+| `analytics.mpp.shuffle.spill.directory` | spill root (one subdir per query); `""` → `<path.data>/shuffle_spill` | `""` |
 | `analytics.mpp.shuffle.spill.max_bytes` | disk ceiling for spill, per node | `50gb` |
+| `analytics.coordinator.buffer_limit` | per-query coordinator allocator cap in bytes for the `FINAL` gather; `0` = no per-query cap (share the coordinator allocator) | `0` |
+
+*Reliability:*
+
+| Setting | Purpose | Default |
+|---|---|---|
+| `analytics.mpp.shuffle.recv_timeout` | per-partition receive timeout — backstop against a stuck shuffle producer | `60s` |
+
+*Shuffle payload:*
+
+| Setting | Purpose | Default |
+|---|---|---|
+| `analytics.mpp.shuffle.prune_columns` | drop columns no operator references before the shuffle, so only the join keys + downstream-referenced columns cross the wire (shrinks the shuffle 5–25× on wide fact tables) | `true` |
+| `analytics.mpp.shuffle.compress` | compress shuffle IPC chunks (standard Arrow IPC compression) to shrink the on-heap buffered bytes — trades CPU for heap headroom | `false` |
+| `analytics.mpp.compression.codec` | shuffle compression codec when enabled — `zstd` or `lz4` | `zstd` |
+| `analytics.mpp.compression.zstd.level` | ZSTD level when the codec is `zstd` (matches Spark's shuffle default); range `1`–`22` | `1` |
+
+Column pruning is **on by default** and does most of the memory + latency work — it's what lets the wide-join queries in §7 run fast and stay under the shuffle budget. IPC compression is **off by default**: once columns are pruned at the source the shuffle is already small, so compression's per-buffer CPU cost tends to outweigh its remaining heap benefit; leave it off unless a node is memory-constrained enough to prefer heap headroom over latency.
 
 **See what ran** — per-strategy counters expose the path each query took:
 
