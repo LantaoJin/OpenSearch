@@ -9,6 +9,9 @@
 package org.opensearch.analytics.spi;
 
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.opensearch.analytics.backend.EngineResultStream;
+
+import java.util.List;
 
 /**
  * Write-only interface for feeding Arrow batches into a stage exchange.
@@ -57,6 +60,29 @@ public interface ExchangeSink {
      * race a concurrent completion.
      */
     default boolean isConsumerDone() {
+        return false;
+    }
+
+    /**
+     * Drain {@code stream} straight into the Rust-native Arrow-Flight shuffle transport instead of
+     * the per-batch {@link #feed} loop: hash-partition each batch by {@code hashKeyChannels} and push
+     * partition {@code p} to {@code targetUris.get(p)}. The {@code (queryId, stageId, side)} triple
+     * plus the partition index key each route on the consumer side. Blocks until the stream is fully
+     * drained and every target's transfer completes.
+     *
+     * <p>Returns {@code true} if this sink handled the drain via Flight (the caller then skips the
+     * {@link #feed}/{@link #close} loop but still emits any header frame the coordinator stream
+     * needs), or {@code false} to fall back to the normal {@link #feed} loop. The default returns
+     * {@code false} so sinks without a native Flight path are unaffected.
+     */
+    default boolean drainViaFlight(
+        EngineResultStream stream,
+        List<String> targetUris,
+        List<Integer> hashKeyChannels,
+        String queryId,
+        int stageId,
+        String side
+    ) {
         return false;
     }
 

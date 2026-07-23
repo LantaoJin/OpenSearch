@@ -17,12 +17,14 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.opensearch.OpenSearchException;
+import org.opensearch.analytics.AnalyticsSettings;
 import org.opensearch.analytics.backend.AnalyticsOperationListener;
 import org.opensearch.analytics.backend.EngineResultBatch;
 import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.backend.FragmentExecutionStats;
 import org.opensearch.analytics.backend.SearchExecEngine;
 import org.opensearch.analytics.backend.ShardScanExecutionContext;
+import org.opensearch.analytics.exec.FragmentResources.FlightShuffleDrain;
 import org.opensearch.analytics.exec.action.FetchByRowIdsRequest;
 import org.opensearch.analytics.exec.action.FragmentExecutionRequest;
 import org.opensearch.analytics.exec.action.WorkerFragmentRequest;
@@ -45,6 +47,7 @@ import org.opensearch.analytics.spi.ShuffleProducerOutputState;
 import org.opensearch.analytics.spi.ShuffleSender;
 import org.opensearch.arrow.allocator.ArrowNativeAllocator;
 import org.opensearch.arrow.spi.NativeAllocatorPoolConfig;
+import org.opensearch.cluster.node.DiscoveryNode;
 import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.core.common.io.stream.NamedWriteableRegistry;
 import org.opensearch.core.tasks.TaskCancelledException;
@@ -57,6 +60,7 @@ import org.opensearch.tasks.TaskResourceTrackingService;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -151,6 +155,25 @@ public class AnalyticsSearchService implements AutoCloseable {
      */
     public void setShuffleBufferRegistry(ShuffleBufferRegistry registry) {
         this.shuffleBufferRegistry = registry;
+    }
+
+    /**
+     * Terminal cleanup of backend-owned shuffle state for {@code queryId} on this node — the companion
+     * to {@code shuffleBufferRegistry.clearForQuery}, called from the same cancellation and
+     * executor-rejection paths. The engine is backend-agnostic, so it fans out to every registered
+     * backend's {@link AnalyticsSearchBackendPlugin#clearShuffleQuery} (default no-op); the DataFusion
+     * backend uses it to fail+drop native Flight shuffle routes. Idempotent and best-effort — a
+     * cleanup failure must never mask the original terminal cause.
+     */
+    private void clearBackendShuffleState(String queryId) {
+        if (queryId == null || backends == null) {
+            return;
+        }
+        for (AnalyticsSearchBackendPlugin backend : backends.values()) {
+            try {
+                backend.clearShuffleQuery(queryId);
+            } catch (Exception ignore) {}
+        }
     }
 
     /**
@@ -340,7 +363,7 @@ public class AnalyticsSearchService implements AutoCloseable {
      * empty schema so the response carries a recognizable Arrow Flight frame.
      */
     private void drainAndEmitHeader(FragmentResources ctx, StreamingFragmentResponseHandler responseHandler) throws Exception {
-        drainIntoPartitionedSink(ctx.partitionedSink(), ctx.stream(), responseHandler);
+        drainIntoPartitionedSink(ctx.partitionedSink(), ctx.stream(), responseHandler, ctx.flightShuffleDrain());
     }
 
     /**
@@ -355,25 +378,54 @@ public class AnalyticsSearchService implements AutoCloseable {
     private void drainIntoPartitionedSink(
         ExchangeSink sink,
         EngineResultStream resultStream,
-        StreamingFragmentResponseHandler responseHandler
+        StreamingFragmentResponseHandler responseHandler,
+        FlightShuffleDrain flightShuffleDrain
     ) throws Exception {
         int count = 0;
         Schema capturedSchema = null;
-        try {
-            Iterator<EngineResultBatch> it = resultStream.iterator();
-            while (it.hasNext()) {
-                VectorSchemaRoot batch = it.next().getArrowRoot();
-                if (capturedSchema == null) {
-                    capturedSchema = batch.getSchema();
+        // Flight-shuffle drain: when a spec was resolved (Flight enabled + every target's port
+        // published), let the sink drain the native stream straight into the Flight transport. If it
+        // handles the drain we skip the per-batch feed()/close() loop entirely, but we STILL emit the
+        // zero-row header below so the coordinator-bound stream terminates. If drainViaFlight returns
+        // false (not a native stream / pointer gone), fall through to the Java feed() loop unchanged.
+        boolean drainedViaFlight = false;
+        if (flightShuffleDrain != null) {
+            // Capture the producer's output schema BEFORE the native drain consumes the stream — the
+            // Flight path skips the feed() loop that otherwise sets capturedSchema, so without this the
+            // header frame below would carry an empty (0-field) schema and the coordinator-bound Flight
+            // transport rejects it ("Native Arrow batch has no field vectors").
+            capturedSchema = resultStream.schema();
+            drainedViaFlight = sink.drainViaFlight(
+                resultStream,
+                flightShuffleDrain.targetUris(),
+                flightShuffleDrain.hashKeyChannels(),
+                flightShuffleDrain.queryId(),
+                flightShuffleDrain.stageId(),
+                flightShuffleDrain.side()
+            );
+        }
+        if (!drainedViaFlight) {
+            try {
+                Iterator<EngineResultBatch> it = resultStream.iterator();
+                while (it.hasNext()) {
+                    VectorSchemaRoot batch = it.next().getArrowRoot();
+                    if (capturedSchema == null) {
+                        capturedSchema = batch.getSchema();
+                    }
+                    sink.feed(batch);
+                    count++;
                 }
-                sink.feed(batch);
-                count++;
+                LOGGER.debug("drainAndEmitHeader: drained {} batches, closing sink", count);
+            } finally {
+                // Close the sink here so isLast markers ship before FragmentResources.close() tears
+                // down the engine. close() is idempotent on the sink contract; FragmentResources
+                // does NOT redundantly close it (see comment in FragmentResources.close()).
+                sink.close();
             }
-            LOGGER.debug("drainAndEmitHeader: drained {} batches, closing sink", count);
-        } finally {
-            // Close the sink here so isLast markers ship before FragmentResources.close() tears
-            // down the engine. close() is idempotent on the sink contract; FragmentResources
-            // does NOT redundantly close it (see comment in FragmentResources.close()).
+        } else {
+            LOGGER.debug("drainAndEmitHeader: drained producer output via Flight shuffle, closing sink");
+            // The Flight drain owns shipping every partition + its isLast markers natively; the Java
+            // sink shipped nothing, so close() only releases its (idle) resources.
             sink.close();
         }
 
@@ -439,7 +491,10 @@ public class AnalyticsSearchService implements AutoCloseable {
             // this same task during engine.execute. setCancellationListener is single-slot and the
             // engine's call would overwrite this buffer-cleanup hook (→ leak on cancel of a running
             // worker); addCancellationListener composes so both fire.
-            task.addCancellationListener(() -> shuffleBufferRegistry.clearForQuery(cancelQueryId));
+            task.addCancellationListener(() -> {
+                shuffleBufferRegistry.clearForQuery(cancelQueryId);
+                clearBackendShuffleState(cancelQueryId);
+            });
         }
         try {
             executor.execute(() -> {
@@ -478,6 +533,7 @@ public class AnalyticsSearchService implements AutoCloseable {
                         request.getStageId()
                     );
                     ExchangeSink partitionedSink = producer.partitionedSink();
+                    FlightShuffleDrain flightDrain = producer.flightShuffleDrain();
                     backendContext = producer.engineContext();
 
                     engine = backend.getSearchExecEngineProvider().createSearchExecEngine(ctx, backendContext);
@@ -486,7 +542,7 @@ public class AnalyticsSearchService implements AutoCloseable {
                         // Producer worker: ship batches out-of-band via the partitioned sink and emit
                         // a single header-only frame on the coordinator-bound stream (mirrors the shard
                         // producer path). drainIntoPartitionedSink closes the sink when done.
-                        drainIntoPartitionedSink(partitionedSink, stream, responseHandler);
+                        drainIntoPartitionedSink(partitionedSink, stream, responseHandler, flightDrain);
                         responseHandler.onComplete();
                     } else {
                         Iterator<EngineResultBatch> it = stream.iterator();
@@ -546,6 +602,7 @@ public class AnalyticsSearchService implements AutoCloseable {
                     shuffleBufferRegistry.clearForQuery(request.getQueryId());
                 } catch (Exception ignore) {}
             }
+            clearBackendShuffleState(request.getQueryId());
             responseHandler.onFailure(e);
         }
     }
@@ -796,6 +853,7 @@ public class AnalyticsSearchService implements AutoCloseable {
             // executeFragmentStreamingAsync; we just attach the sink to FragmentResources here.
             ProducerSinkResolution producer = resolveProducerSink(backend, backendContext, ctx, resolved.queryId, resolved.stageId);
             ExchangeSink partitionedSink = producer.partitionedSink();
+            FlightShuffleDrain flightDrain = producer.flightShuffleDrain();
             backendContext = producer.engineContext();
 
             engine = backend.getSearchExecEngineProvider().createSearchExecEngine(ctx, backendContext);
@@ -809,7 +867,8 @@ public class AnalyticsSearchService implements AutoCloseable {
                 null,
                 requiresTopDocs,
                 partitionedSink,
-                ctx
+                ctx,
+                flightDrain
             );
         } catch (Exception e) {
             LOGGER.error(
@@ -887,10 +946,13 @@ public class AnalyticsSearchService implements AutoCloseable {
 
     /**
      * Holder for the result of {@link #resolveProducerSink}: the partitioned sink to drain into
-     * (null when this fragment is not a hash-shuffle producer) and the {@link BackendExecutionContext}
-     * the engine should run against (the upstream session state, unwrapped from the producer carrier).
+     * (null when this fragment is not a hash-shuffle producer), the {@link BackendExecutionContext}
+     * the engine should run against (the upstream session state, unwrapped from the producer carrier),
+     * and the resolved Flight-shuffle drain spec (non-null only when Flight is enabled AND every
+     * target node published its Flight port — otherwise null and the sink drains over the Java path).
      */
-    private record ProducerSinkResolution(ExchangeSink partitionedSink, BackendExecutionContext engineContext) {
+    private record ProducerSinkResolution(ExchangeSink partitionedSink, BackendExecutionContext engineContext,
+        FlightShuffleDrain flightShuffleDrain) {
     }
 
     /**
@@ -917,10 +979,55 @@ public class AnalyticsSearchService implements AutoCloseable {
                 );
             }
             ExchangeSink partitionedSink = buildPartitionedSink(backend, producerState, ctx, queryId, stageId);
+            // When the Flight shuffle is enabled AND every target node has published its Flight port,
+            // resolve the per-partition Flight URIs so the drain site can hand them to
+            // ExchangeSink.drainViaFlight. Any missing port (attr absent) means Flight isn't usable
+            // for this shuffle → leave the spec null so the sink drains over the Java path.
+            FlightShuffleDrain flightDrain = resolveFlightShuffleDrain(producerState);
             // Engine sees the upstream session state, not the carrier.
-            return new ProducerSinkResolution(partitionedSink, producerState.getDelegate());
+            return new ProducerSinkResolution(partitionedSink, producerState.getDelegate(), flightDrain);
         }
-        return new ProducerSinkResolution(null, backendContext);
+        return new ProducerSinkResolution(null, backendContext, null);
+    }
+
+    /**
+     * Resolves the per-partition Flight endpoint URIs for a hash-shuffle producer, or {@code null}
+     * when Flight can't be used for this shuffle. Gated on the producer's OWN per-shuffle-edge
+     * {@code usesFlightShuffle()} — the ONE decision the coordinator made and stamped on BOTH this
+     * producer and the matching consumer scan node — NOT the raw cluster flag. This guarantees the
+     * producer ships Flight only when its consumer registered a Flight route (else the push would hit
+     * "no registered route"). Also returns null when ANY target node lacks the published
+     * {@link AnalyticsSettings#FLIGHT_PORT_NODE_ATTR} attribute (a mixed cluster where some nodes don't
+     * run the Flight server — falling back keeps correctness). URI shape mirrors {@code ShuffleSenderImpl}'s
+     * node lookup: {@code http://<host>:<port>}.
+     */
+    private FlightShuffleDrain resolveFlightShuffleDrain(ShuffleProducerOutputState producerState) {
+        if (!producerState.usesFlightShuffle()) {
+            return null;
+        }
+        List<String> targetNodeIds = producerState.getTargetWorkerNodeIds();
+        List<String> uris = new ArrayList<>(targetNodeIds.size());
+        for (String nodeId : targetNodeIds) {
+            DiscoveryNode node = clusterService.state().nodes().get(nodeId);
+            if (node == null) {
+                return null;
+            }
+            String port = node.getAttributes().get(AnalyticsSettings.FLIGHT_PORT_NODE_ATTR);
+            if (port == null) {
+                // At least one target isn't running the Flight server — fall back to the Java path
+                // rather than building URIs, so the producer doesn't ship to a dead endpoint.
+                return null;
+            }
+            String host = node.getAddress().getAddress();
+            uris.add("http://" + host + ":" + port);
+        }
+        return new FlightShuffleDrain(
+            uris,
+            producerState.getHashKeyChannels(),
+            producerState.getQueryId(),
+            producerState.getTargetStageId(),
+            producerState.getSide()
+        );
     }
 
     /**

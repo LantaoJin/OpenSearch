@@ -103,6 +103,18 @@ impl PartitionStreamSender {
         }
     }
 
+    /// Push a batch from an ASYNC context (e.g. the Flight `do_put` handler running on the
+    /// io_runtime). Awaits the bounded channel's capacity for natural backpressure — the async
+    /// analog of [`send_blocking`](Self::send_blocking). Returns [`SendOutcome::ReceiverDropped`]
+    /// if the consumer dropped its receiver (its sole failure mode). Used by the Rust-native Flight
+    /// shuffle path ([`crate::flight_shuffle`]); the FFM/Java path keeps using `send_blocking`.
+    pub async fn send_async(&self, batch: Result<RecordBatch, DataFusionError>) -> SendOutcome {
+        match self.tx.send(batch).await {
+            Ok(()) => SendOutcome::Sent,
+            Err(_) => SendOutcome::ReceiverDropped,
+        }
+    }
+
     /// Marks the stream as TERMINALLY FAILED. Used by the failure path (`sender_fail`) when the
     /// producer/drain died mid-stream: the consumer must see an `Err` (so the query fails) rather than
     /// a clean EOF. Records the reason in the out-of-band `failure` flag (shared with the receiver) and

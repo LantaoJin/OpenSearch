@@ -1283,6 +1283,55 @@ pub async unsafe fn stream_next(
     }
 }
 
+/// Producer seam: drain the stage's native output stream `stream_ptr` straight into the Rust-native
+/// Flight shuffle — hash-partition each batch and stream partition `p` to `targets[p]` — without a
+/// `stream_next` pull into Java or the `DatafusionPartitionedSink` IPC/transport tail. Blocks (on the
+/// caller's runtime) until the input is drained and every target `do_put` completes.
+///
+/// `targets[p]` = the `http://host:port` of the node hosting partition `p`'s consumer; the shared
+/// `(query_id, stage_id, side)` + the partition index form the `ShuffleKey` that node registered.
+/// Borrows the handle's stream (`&mut`) — ownership stays with the caller, which frees it via
+/// `stream_close` afterwards (matching `stream_next`).
+///
+/// # Safety
+/// `stream_ptr` must be a valid, non-zero `QueryStreamHandle` pointer, not used concurrently.
+#[allow(clippy::too_many_arguments)]
+pub async unsafe fn execute_flight_shuffle(
+    stream_ptr: i64,
+    hash_key_indices: Vec<usize>,
+    target_uris: Vec<String>,
+    query_id: String,
+    stage_id: i32,
+    side: String,
+    io_handle: tokio::runtime::Handle,
+) -> Result<i64, DataFusionError> {
+    let handle = &mut *(stream_ptr as *mut QueryStreamHandle);
+    let schema = handle.stream.schema();
+    let targets: Vec<crate::flight_shuffle::PartitionTarget> = target_uris
+        .into_iter()
+        .enumerate()
+        .map(|(p, uri)| crate::flight_shuffle::PartitionTarget {
+            uri,
+            key: crate::flight_shuffle::ShuffleKey {
+                query_id: query_id.clone(),
+                stage_id,
+                partition: p as i32,
+                side: side.clone(),
+            },
+        })
+        .collect();
+    crate::flight_shuffle::drain_stream_to_flight(
+        &mut handle.stream,
+        hash_key_indices,
+        schema,
+        targets,
+        &io_handle,
+    )
+    .await
+    .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    Ok(0)
+}
+
 /// Prevents sliced StringView batches from carrying full backing buffers across FFI.
 fn compact_string_view_columns(batch: RecordBatch) -> RecordBatch {
     let schema = batch.schema();
@@ -2946,6 +2995,121 @@ pub unsafe fn register_partition_stream_on_session_context_from_partial_plan(
             ))
         })?;
     Ok(Box::into_raw(Box::new(sender)) as i64)
+}
+
+/// Rust-native Flight shuffle CONSUMER seam.
+///
+/// Same `StreamingTable` + `register_table(input_id, ...)` as
+/// [`register_partition_stream_on_session_context`], but instead of returning the
+/// [`crate::partition_stream::PartitionStreamSender`] to Java (which would drive the
+/// `senderSend`/drain-thread FFM loop), it PARKS the sender in the node-global
+/// [`crate::flight_shuffle::ShuffleRouteRegistry`] under `key`. Inbound Flight `do_put`s for that key
+/// then feed the `StreamingTable` directly — no Java buffer, no drain thread, no FFI per batch.
+///
+/// `expected_senders` is the fan-in producer count (mirrors Java `expectedSenders`); the channel
+/// reaches EOF only after the last producer's `do_put` completes. Returns `0` on success (no sender
+/// ptr for Java to own). Errors (node not running, register-table failure) surface through the FFM
+/// wrapper so the caller can fall back to the Java shuffle path.
+///
+/// # Safety
+/// - `session_ctx_handle_ptr` must be a valid, non-zero `SessionContextHandle` pointer.
+/// - `schema_ipc` must be a complete Arrow IPC schema-message blob.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn register_flight_partition_stream_on_session_context(
+    session_ctx_handle_ptr: i64,
+    input_id: &str,
+    schema_ipc: &[u8],
+    query_id: &str,
+    stage_id: i32,
+    partition: i32,
+    side: &str,
+    expected_senders: i32,
+) -> Result<i64, DataFusionError> {
+    let table_schema = schema_from_ipc_bytes(schema_ipc)?;
+    register_flight_partition_stream_inner(
+        session_ctx_handle_ptr,
+        input_id,
+        table_schema,
+        query_id,
+        stage_id,
+        partition,
+        side,
+        expected_senders,
+    )
+}
+
+/// Agg-shuffle variant of [`register_flight_partition_stream_on_session_context`]: derives the
+/// (logical-named) table schema from the producer's PARTIAL substrait plan (the q1/q15 by-name-bind
+/// fix — see [`register_partition_stream_on_session_context_from_partial_plan`]) instead of the raw
+/// IPC header, then registers the Flight route identically.
+///
+/// # Safety
+/// - `session_ctx_handle_ptr` must be a valid, non-zero `SessionContextHandle` pointer.
+/// - `partial_plan_bytes` must be a complete producer-side Substrait plan blob.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn register_flight_partition_stream_on_session_context_from_partial_plan(
+    session_ctx_handle_ptr: i64,
+    input_id: &str,
+    partial_plan_bytes: &[u8],
+    query_id: &str,
+    stage_id: i32,
+    partition: i32,
+    side: &str,
+    expected_senders: i32,
+) -> Result<i64, DataFusionError> {
+    let table_schema = derive_schema_from_partial_plan(partial_plan_bytes)?;
+    register_flight_partition_stream_inner(
+        session_ctx_handle_ptr,
+        input_id,
+        table_schema,
+        query_id,
+        stage_id,
+        partition,
+        side,
+        expected_senders,
+    )
+}
+
+/// Shared body for the two Flight consumer-seam entry points: build the `StreamingTable` over a fresh
+/// partition-stream channel, register it under `input_id`, and park the sender in the node registry
+/// under the `ShuffleKey`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn register_flight_partition_stream_inner(
+    session_ctx_handle_ptr: i64,
+    input_id: &str,
+    table_schema: Arc<datafusion::arrow::datatypes::Schema>,
+    query_id: &str,
+    stage_id: i32,
+    partition: i32,
+    side: &str,
+    expected_senders: i32,
+) -> Result<i64, DataFusionError> {
+    let (sender, receiver) = crate::partition_stream::channel(Arc::clone(&table_schema));
+    let part: Arc<dyn datafusion::physical_plan::streaming::PartitionStream> =
+        Arc::new(crate::partition_stream::SingleReceiverPartition::new(receiver));
+    let table = datafusion::catalog::streaming::StreamingTable::try_new(
+        Arc::clone(&table_schema),
+        vec![part],
+    )?;
+    let handle = &*(session_ctx_handle_ptr as *const crate::session_context::SessionContextHandle);
+    handle
+        .ctx
+        .register_table(input_id, Arc::new(table))
+        .map_err(|e| {
+            DataFusionError::Execution(format!(
+                "Failed to register Flight streaming table '{}' on session context: {}",
+                input_id, e
+            ))
+        })?;
+    let key = crate::flight_shuffle::ShuffleKey {
+        query_id: query_id.to_string(),
+        stage_id,
+        partition,
+        side: side.to_string(),
+    };
+    crate::flight_shuffle::register_route(key, sender, expected_senders.max(1) as usize)
+        .map_err(DataFusionError::Execution)?;
+    Ok(0)
 }
 
 /// Variant of [`register_memtable`] for the shard-scan path's `SessionContextHandle`. The

@@ -34,6 +34,7 @@ pub mod indexed_table;
 pub mod local_executor;
 pub mod memory;
 pub mod memory_guard;
+pub mod flight_shuffle;
 pub mod native_error;
 pub mod partition_stream;
 pub mod patterns;

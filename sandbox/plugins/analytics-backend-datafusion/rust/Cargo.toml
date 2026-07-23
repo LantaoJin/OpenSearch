@@ -23,6 +23,10 @@ arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 
+# Rust-native Flight shuffle PoC (poc/rust-native-flight-shuffle).
+arrow-flight = { workspace = true }
+tonic = { workspace = true }
+
 parquet = { workspace = true }
 object_store = { workspace = true }
 bytes = { workspace = true }

@@ -208,6 +208,16 @@ public interface AnalyticsSearchBackendPlugin {
     default void cancelByContext(long contextId) {}
 
     /**
+     * Terminal cleanup of any backend-side shuffle state a query left on THIS node — the backend-owned
+     * companion to the engine's {@code ShuffleBufferRegistry.clearForQuery}. Called from the same
+     * cancellation and executor-rejection paths (idempotent, once per queryId per node). For backends
+     * with a Rust-native Flight shuffle this fails+drops the node's Flight routes for the query so a
+     * cancelled/crashed peer can't leak a route or hang a parked consumer; default no-op for backends
+     * (or queries) that keep all shuffle state on the engine's Java side.
+     */
+    default void clearShuffleQuery(String queryId) {}
+
+    /**
      * Converts a backend-specific exception into an appropriate OpenSearch exception type.
      *
      * <p>Called by the engine when a fragment execution fails. If the backend recognizes

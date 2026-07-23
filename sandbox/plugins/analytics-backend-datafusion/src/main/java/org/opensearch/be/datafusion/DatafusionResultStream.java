@@ -49,6 +49,7 @@ public class DatafusionResultStream implements EngineResultStream, FragmentResou
     private final BufferAllocator allocator;
     private final CDataDictionaryProvider dictionaryProvider;
     private volatile BatchIterator iteratorInstance;
+    private volatile Schema cachedSchema;
 
     // Allocator is caller-owned; this stream imports into it but never closes it.
     public DatafusionResultStream(StreamHandle streamHandle, BufferAllocator allocator) {
@@ -65,9 +66,42 @@ public class DatafusionResultStream implements EngineResultStream, FragmentResou
         return iteratorInstance;
     }
 
+    /**
+     * Resolves the native stream's Arrow schema without consuming a batch (a pure metadata FFI call —
+     * {@code df_stream_get_schema} reads {@code stream.schema()}, independent of {@code streamNext}), so
+     * it is valid before, during, or after the stream is drained. The Flight-shuffle producer drain
+     * calls this BEFORE {@code drainViaFlight} consumes the stream so the coordinator-bound header frame
+     * carries the real schema (an empty schema makes the Flight transport reject the header with
+     * "Native Arrow batch has no field vectors"). Cached — the schema is fixed for the stream's life.
+     */
+    @Override
+    public Schema schema() {
+        Schema resolved = cachedSchema;
+        if (resolved != null) {
+            return resolved;
+        }
+        long schemaAddr = BatchIterator.callNativeFn(listener -> NativeBridge.streamGetSchema(streamHandle.getPointer(), listener));
+        try (ArrowSchema arrowSchema = ArrowSchema.wrap(schemaAddr)) {
+            Field structField = importField(allocator, arrowSchema, dictionaryProvider);
+            if (structField.getType().getTypeID() != ArrowType.ArrowTypeID.Struct) {
+                throw new IllegalStateException("ArrowSchema describes non-struct type");
+            }
+            resolved = new Schema(structField.getChildren(), structField.getMetadata());
+        }
+        cachedSchema = resolved;
+        return resolved;
+    }
+
     @Override
     public byte[] getMetricsJson() {
         return NativeBridge.streamGetMetrics(streamHandle.getPointer());
+    }
+
+    /** Native stream pointer, for the Flight-shuffle producer drain that consumes this stream
+     *  in-place ({@code DatafusionPartitionedSink.drainViaFlight}). Package-private so only the
+     *  backend's sink can reach it. Throws if the handle has already been closed. */
+    long nativeStreamPointer() {
+        return streamHandle.getPointer();
     }
 
     @Override
@@ -175,7 +209,7 @@ public class DatafusionResultStream implements EngineResultStream, FragmentResou
             }
         }
 
-        private static long callNativeFn(java.util.function.Consumer<ActionListener<Long>> fn) {
+        static long callNativeFn(java.util.function.Consumer<ActionListener<Long>> fn) {
             CompletableFuture<Long> future = new CompletableFuture<>();
             fn.accept(new ActionListener<>() {
                 @Override

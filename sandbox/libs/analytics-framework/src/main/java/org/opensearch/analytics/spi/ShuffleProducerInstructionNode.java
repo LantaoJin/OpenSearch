@@ -36,6 +36,7 @@ public class ShuffleProducerInstructionNode implements InstructionNode {
     private final String queryId;
     private final int targetStageId;
     private final String side;
+    private final boolean usesFlightShuffle;
 
     public ShuffleProducerInstructionNode(
         List<Integer> hashKeyChannels,
@@ -45,12 +46,25 @@ public class ShuffleProducerInstructionNode implements InstructionNode {
         int targetStageId,
         String side
     ) {
+        this(hashKeyChannels, partitionCount, targetWorkerNodeIds, queryId, targetStageId, side, false);
+    }
+
+    public ShuffleProducerInstructionNode(
+        List<Integer> hashKeyChannels,
+        int partitionCount,
+        List<String> targetWorkerNodeIds,
+        String queryId,
+        int targetStageId,
+        String side,
+        boolean usesFlightShuffle
+    ) {
         this.hashKeyChannels = List.copyOf(hashKeyChannels);
         this.partitionCount = partitionCount;
         this.targetWorkerNodeIds = List.copyOf(targetWorkerNodeIds);
         this.queryId = queryId;
         this.targetStageId = targetStageId;
         this.side = side;
+        this.usesFlightShuffle = usesFlightShuffle;
     }
 
     public ShuffleProducerInstructionNode(StreamInput in) throws IOException {
@@ -65,6 +79,7 @@ public class ShuffleProducerInstructionNode implements InstructionNode {
         this.queryId = in.readString();
         this.targetStageId = in.readVInt();
         this.side = in.readString();
+        this.usesFlightShuffle = in.readBoolean();
     }
 
     public List<Integer> getHashKeyChannels() {
@@ -91,6 +106,15 @@ public class ShuffleProducerInstructionNode implements InstructionNode {
         return side;
     }
 
+    /** True when this producer ships over the Rust-native Flight shuffle transport instead of the Java
+     *  {@code AnalyticsShuffleDataAction} path. Set by the coordinator as ONE per-shuffle-edge decision
+     *  that is stamped on BOTH this producer node and the matching consumer's
+     *  {@code ShuffleScanInstructionNode.usesFlightShuffle()} — so a producer only ships Flight when its
+     *  consumer will register a Flight route (otherwise the push hits "no registered route"). */
+    public boolean usesFlightShuffle() {
+        return usesFlightShuffle;
+    }
+
     @Override
     public InstructionType type() {
         return InstructionType.SHUFFLE_PRODUCER;
@@ -107,5 +131,6 @@ public class ShuffleProducerInstructionNode implements InstructionNode {
         out.writeString(queryId);
         out.writeVInt(targetStageId);
         out.writeString(side);
+        out.writeBoolean(usesFlightShuffle);
     }
 }

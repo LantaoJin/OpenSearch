@@ -36,6 +36,7 @@ public class ShuffleProducerOutputState implements BackendExecutionContext {
     private final int targetStageId;
     private final String side;
     private final BackendExecutionContext delegate;
+    private final boolean usesFlightShuffle;
 
     /**
      * @param hashKeyChannels     0-indexed channels to hash-partition on
@@ -59,6 +60,25 @@ public class ShuffleProducerOutputState implements BackendExecutionContext {
         String side,
         BackendExecutionContext delegate
     ) {
+        this(hashKeyChannels, partitionCount, targetWorkerNodeIds, queryId, targetStageId, side, delegate, false);
+    }
+
+    /**
+     * @param usesFlightShuffle the per-shuffle-edge Flight decision copied from the
+     *                          {@code ShuffleProducerInstructionNode}; the framework dispatches this
+     *                          producer over the Rust-native Flight transport only when true (matching
+     *                          the consumer scan node's {@code usesFlightShuffle}), else the Java path.
+     */
+    public ShuffleProducerOutputState(
+        List<Integer> hashKeyChannels,
+        int partitionCount,
+        List<String> targetWorkerNodeIds,
+        String queryId,
+        int targetStageId,
+        String side,
+        BackendExecutionContext delegate,
+        boolean usesFlightShuffle
+    ) {
         this.hashKeyChannels = List.copyOf(hashKeyChannels);
         this.partitionCount = partitionCount;
         this.targetWorkerNodeIds = List.copyOf(targetWorkerNodeIds);
@@ -66,6 +86,7 @@ public class ShuffleProducerOutputState implements BackendExecutionContext {
         this.targetStageId = targetStageId;
         this.side = side;
         this.delegate = delegate;
+        this.usesFlightShuffle = usesFlightShuffle;
     }
 
     public List<Integer> getHashKeyChannels() {
@@ -96,6 +117,12 @@ public class ShuffleProducerOutputState implements BackendExecutionContext {
      *  factory in place of the carrier itself. */
     public BackendExecutionContext getDelegate() {
         return delegate;
+    }
+
+    /** True when this producer must ship over the Rust-native Flight transport (the per-shuffle-edge
+     *  decision, matching the consumer scan node); false = Java {@code AnalyticsShuffleDataAction} path. */
+    public boolean usesFlightShuffle() {
+        return usesFlightShuffle;
     }
 
     @Override

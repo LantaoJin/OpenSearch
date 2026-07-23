@@ -83,6 +83,11 @@ public final class NativeBridge {
 
     private static final MethodHandle INIT_RUNTIME_MANAGER;
     private static final MethodHandle SHUTDOWN_RUNTIME_MANAGER;
+    private static final MethodHandle START_FLIGHT_SHUFFLE_SERVER;
+    private static final MethodHandle STOP_FLIGHT_SHUFFLE_SERVER;
+    private static final MethodHandle FLIGHT_SHUFFLE_SERVER_RUNNING;
+    private static final MethodHandle CLEAR_FLIGHT_SHUFFLE_QUERY;
+    private static final MethodHandle EXECUTE_FLIGHT_SHUFFLE;
     private static final MethodHandle CREATE_GLOBAL_RUNTIME;
     private static final MethodHandle CLOSE_GLOBAL_RUNTIME;
     private static final MethodHandle GET_MEMORY_POOL_USAGE;
@@ -125,6 +130,8 @@ public final class NativeBridge {
     private static final MethodHandle REGISTER_MEMTABLE_ON_SESSION_CONTEXT;
     private static final MethodHandle REGISTER_PARTITION_STREAM_ON_SESSION_CONTEXT;
     private static final MethodHandle REGISTER_PARTITION_STREAM_ON_SESSION_CONTEXT_FROM_PARTIAL_PLAN;
+    private static final MethodHandle REGISTER_FLIGHT_PARTITION_STREAM_ON_SESSION_CONTEXT;
+    private static final MethodHandle REGISTER_FLIGHT_PARTITION_STREAM_ON_SESSION_CONTEXT_FROM_PARTIAL_PLAN;
     private static final MethodHandle PARTITION_BATCH_BY_HASH;
     private static final MethodHandle CREATE_CUSTOM_CACHE_MANAGER;
     private static final MethodHandle DESTROY_CUSTOM_CACHE_MANAGER;
@@ -170,6 +177,50 @@ public final class NativeBridge {
         SHUTDOWN_RUNTIME_MANAGER = linker.downcallHandle(
             lib.find("df_shutdown_runtime_manager").orElseThrow(),
             FunctionDescriptor.ofVoid()
+        );
+
+        // i64 df_start_flight_shuffle_server(i32 port) — returns the actual bound port (or an
+        // ffm_safe-encoded error pointer, decoded by NativeCall.invoke). Rust-native shuffle transport.
+        START_FLIGHT_SHUFFLE_SERVER = linker.downcallHandle(
+            lib.find("df_start_flight_shuffle_server").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT)
+        );
+
+        STOP_FLIGHT_SHUFFLE_SERVER = linker.downcallHandle(
+            lib.find("df_stop_flight_shuffle_server").orElseThrow(),
+            FunctionDescriptor.ofVoid()
+        );
+
+        FLIGHT_SHUFFLE_SERVER_RUNNING = linker.downcallHandle(
+            lib.find("df_flight_shuffle_server_running").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG)
+        );
+
+        // i64 df_clear_flight_shuffle_query(query_id_ptr, query_id_len) — returns count cleared.
+        CLEAR_FLIGHT_SHUFFLE_QUERY = linker.downcallHandle(
+            lib.find("df_clear_flight_shuffle_query").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG)
+        );
+
+        // i64 df_execute_flight_shuffle(stream_ptr, hash_keys(ptr,len:i32[]),
+        // target_uris(ptrs,lens), partition_count, query_id(ptr,len), stage_id, side(ptr,len))
+        // Drains the producer stream natively into the Flight shuffle. Blocks until fully sent.
+        EXECUTE_FLIGHT_SHUFFLE = linker.downcallHandle(
+            lib.find("df_execute_flight_shuffle").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,   // stream_ptr
+                ValueLayout.ADDRESS,     // hash_key_indices ptr (i32[])
+                ValueLayout.JAVA_LONG,   // hash_key_indices len
+                ValueLayout.ADDRESS,     // target_uris ptrs
+                ValueLayout.ADDRESS,     // target_uris lens
+                ValueLayout.JAVA_LONG,   // partition_count
+                ValueLayout.ADDRESS,     // query_id ptr
+                ValueLayout.JAVA_LONG,   // query_id len
+                ValueLayout.JAVA_INT,    // stage_id
+                ValueLayout.ADDRESS,     // side ptr
+                ValueLayout.JAVA_LONG    // side len
+            )
         );
 
         CREATE_GLOBAL_RUNTIME = linker.downcallHandle(
@@ -438,6 +489,48 @@ public final class NativeBridge {
                 ValueLayout.JAVA_LONG,
                 ValueLayout.ADDRESS,
                 ValueLayout.JAVA_LONG
+            )
+        );
+
+        // i64 df_register_flight_partition_stream_on_session_context(
+        // session_ptr, input_id(ptr,len), schema_ipc(ptr,len),
+        // query_id(ptr,len), stage_id:i32, partition:i32, side(ptr,len), expected_senders:i32)
+        // Rust-native Flight shuffle consumer seam.
+        REGISTER_FLIGHT_PARTITION_STREAM_ON_SESSION_CONTEXT = linker.downcallHandle(
+            lib.find("df_register_flight_partition_stream_on_session_context").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,   // session_ctx_handle_ptr
+                ValueLayout.ADDRESS,     // input_id ptr
+                ValueLayout.JAVA_LONG,   // input_id len
+                ValueLayout.ADDRESS,     // schema_ipc ptr
+                ValueLayout.JAVA_LONG,   // schema_ipc len
+                ValueLayout.ADDRESS,     // query_id ptr
+                ValueLayout.JAVA_LONG,   // query_id len
+                ValueLayout.JAVA_INT,    // stage_id
+                ValueLayout.JAVA_INT,    // partition
+                ValueLayout.ADDRESS,     // side ptr
+                ValueLayout.JAVA_LONG,   // side len
+                ValueLayout.JAVA_INT     // expected_senders
+            )
+        );
+
+        REGISTER_FLIGHT_PARTITION_STREAM_ON_SESSION_CONTEXT_FROM_PARTIAL_PLAN = linker.downcallHandle(
+            lib.find("df_register_flight_partition_stream_on_session_context_from_partial_plan").orElseThrow(),
+            FunctionDescriptor.of(
+                ValueLayout.JAVA_LONG,
+                ValueLayout.JAVA_LONG,   // session_ctx_handle_ptr
+                ValueLayout.ADDRESS,     // input_id ptr
+                ValueLayout.JAVA_LONG,   // input_id len
+                ValueLayout.ADDRESS,     // partial_plan ptr
+                ValueLayout.JAVA_LONG,   // partial_plan len
+                ValueLayout.ADDRESS,     // query_id ptr
+                ValueLayout.JAVA_LONG,   // query_id len
+                ValueLayout.JAVA_INT,    // stage_id
+                ValueLayout.JAVA_INT,    // partition
+                ValueLayout.ADDRESS,     // side ptr
+                ValueLayout.JAVA_LONG,   // side len
+                ValueLayout.JAVA_INT     // expected_senders
             )
         );
 
@@ -830,6 +923,84 @@ public final class NativeBridge {
 
     public static void shutdownTokioRuntimeManager() {
         NativeCall.invokeVoid(SHUTDOWN_RUNTIME_MANAGER);
+    }
+
+    // ---- Rust-native shuffle Flight server ----
+
+    /**
+     * Starts the per-node Rust-native shuffle Flight server on the native IO runtime and returns the
+     * ACTUAL bound port so the coordinator can publish it. Pass {@code 0} to request an ephemeral
+     * port. Replaces any previously-running server. Throws if the native runtime is not initialized
+     * or the bind fails.
+     */
+    public static int startFlightShuffleServer(int port) {
+        try (var call = new NativeCall()) {
+            return (int) call.invoke(START_FLIGHT_SHUFFLE_SERVER, port);
+        }
+    }
+
+    /** Stops the per-node shuffle Flight server. Idempotent. */
+    public static void stopFlightShuffleServer() {
+        NativeCall.invokeVoid(STOP_FLIGHT_SHUFFLE_SERVER);
+    }
+
+    /** True if the per-node shuffle Flight server is running (the single source of truth for whether
+     *  the consumer/producer seams take the Flight path vs the Java shuffle path). */
+    public static boolean isFlightShuffleServerRunning() {
+        try {
+            return (long) FLIGHT_SHUFFLE_SERVER_RUNNING.invokeExact() == 1L;
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    /** Fail + drop every Flight shuffle route for {@code queryId} on this node (query-cancel / terminal
+     *  cleanup — the Flight analog of {@code ShuffleBufferManager.clearForQuery}). Returns the number of
+     *  routes cleared; no-op (0) if the Flight server isn't running. */
+    public static long clearFlightShuffleQuery(String queryId) {
+        try (var call = new NativeCall()) {
+            var qid = call.str(queryId);
+            return call.invoke(CLEAR_FLIGHT_SHUFFLE_QUERY, qid.segment(), qid.len());
+        }
+    }
+
+    /**
+     * Producer seam: drain the stage's native output stream ({@code streamPtr}) straight into the
+     * Rust-native Flight shuffle — hash-partition each batch by {@code hashKeyChannels} and stream
+     * partition {@code p} to {@code targetUris[p]}. Blocks until the input is fully drained and every
+     * target's {@code do_put} completes. The shared {@code (queryId, stageId, side)} + the partition
+     * index form each route's {@code ShuffleKey}. {@code targetUris.length} is the partition count.
+     * Does NOT free the stream handle — the caller frees it via {@link #streamClose} afterward.
+     * Throws (via {@link NativeCall}) on any partition/encode/transport/connect error.
+     */
+    public static void executeFlightShuffle(
+        long streamPtr,
+        int[] hashKeyChannels,
+        String[] targetUris,
+        String queryId,
+        int stageId,
+        String side
+    ) {
+        try (var call = new NativeCall()) {
+            var keys = call.ints(hashKeyChannels);
+            var uris = call.strArray(targetUris);
+            var qid = call.str(queryId);
+            var sd = call.str(side);
+            call.invoke(
+                EXECUTE_FLIGHT_SHUFFLE,
+                streamPtr,
+                keys,
+                (long) hashKeyChannels.length,
+                uris.ptrs(),
+                uris.lens(),
+                (long) targetUris.length,
+                qid.segment(),
+                qid.len(),
+                stageId,
+                sd.segment(),
+                sd.len()
+            );
+        }
     }
 
     /**
@@ -1582,6 +1753,91 @@ public final class NativeBridge {
                 id.len(),
                 call.bytes(partialPlanBytes),
                 (long) partialPlanBytes.length
+            );
+        }
+    }
+
+    // ---- Rust-native Flight shuffle consumer seam ----
+
+    /**
+     * Registers a {@code StreamingTable} under {@code inputId} like
+     * {@link #registerPartitionStreamOnSessionContext}, but instead of returning a sender pointer for
+     * Java to drive, PARKS the sender in the node-global Flight route registry keyed by
+     * {@code (queryId, stageId, partition, side)}. Inbound Flight {@code do_put}s for that key feed the
+     * table directly — no Java buffer, drain thread, or per-batch {@code senderSend}.
+     *
+     * <p>{@code expectedSenders} is the fan-in producer count (the same value the
+     * {@code ShuffleWorkerSetupHandler} computes); the stream reaches EOF only after the last producer
+     * finishes. Returns {@code 0} on success (no sender pointer to own). Throws (via {@link NativeCall})
+     * if the Flight server is not running — the caller must fall back to the Java shuffle path.
+     */
+    public static void registerFlightPartitionStreamOnSessionContext(
+        long sessionContextHandlePtr,
+        String inputId,
+        byte[] schemaIpc,
+        String queryId,
+        int stageId,
+        int partition,
+        String side,
+        int expectedSenders
+    ) {
+        NativeHandle.validatePointer(sessionContextHandlePtr, "sessionContextHandle");
+        try (var call = new NativeCall()) {
+            var id = call.str(inputId);
+            var qid = call.str(queryId);
+            var sd = call.str(side);
+            call.invoke(
+                REGISTER_FLIGHT_PARTITION_STREAM_ON_SESSION_CONTEXT,
+                sessionContextHandlePtr,
+                id.segment(),
+                id.len(),
+                call.bytes(schemaIpc),
+                (long) schemaIpc.length,
+                qid.segment(),
+                qid.len(),
+                stageId,
+                partition,
+                sd.segment(),
+                sd.len(),
+                expectedSenders
+            );
+        }
+    }
+
+    /**
+     * Agg-shuffle variant of {@link #registerFlightPartitionStreamOnSessionContext}: derives the
+     * logical-named table schema from the producer's PARTIAL Substrait plan (the q1/q15 by-name-bind
+     * fix) before parking the Flight route.
+     */
+    public static void registerFlightPartitionStreamOnSessionContextFromPartialPlan(
+        long sessionContextHandlePtr,
+        String inputId,
+        byte[] partialPlanBytes,
+        String queryId,
+        int stageId,
+        int partition,
+        String side,
+        int expectedSenders
+    ) {
+        NativeHandle.validatePointer(sessionContextHandlePtr, "sessionContextHandle");
+        try (var call = new NativeCall()) {
+            var id = call.str(inputId);
+            var qid = call.str(queryId);
+            var sd = call.str(side);
+            call.invoke(
+                REGISTER_FLIGHT_PARTITION_STREAM_ON_SESSION_CONTEXT_FROM_PARTIAL_PLAN,
+                sessionContextHandlePtr,
+                id.segment(),
+                id.len(),
+                call.bytes(partialPlanBytes),
+                (long) partialPlanBytes.length,
+                qid.segment(),
+                qid.len(),
+                stageId,
+                partition,
+                sd.segment(),
+                sd.len(),
+                expectedSenders
             );
         }
     }

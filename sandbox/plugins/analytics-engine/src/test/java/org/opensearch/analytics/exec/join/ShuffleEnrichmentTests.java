@@ -64,7 +64,8 @@ public class ShuffleEnrichmentTests extends OpenSearchTestCase {
             /* partitionCount */ 3,
             List.of("node-0", "node-1", "node-2"),
             "left",
-            shuffleCapableRegistry("df")
+            shuffleCapableRegistry("df"),
+            /* useFlightShuffle */ false
         );
 
         List<StagePlan> enriched = producer.getPlanAlternatives();
@@ -101,7 +102,8 @@ public class ShuffleEnrichmentTests extends OpenSearchTestCase {
                 /* partitionCount */ 2,
                 List.of("node-0", "node-1"),
                 "left",
-                shuffleCapableRegistry("df") // only "df" is producer-capable; the "lucene" alt is dropped
+                shuffleCapableRegistry("df"), // only "df" is producer-capable; the "lucene" alt is dropped
+                /* useFlightShuffle */ false
             )
         );
         assertTrue(
@@ -125,7 +127,10 @@ public class ShuffleEnrichmentTests extends OpenSearchTestCase {
             /* queryId */ "qid-test",
             /* leftProducerStageId */ 11,
             /* rightProducerStageId */ 12,
-            /* preferHashJoin */ true
+            /* preferHashJoin */ true,
+            /* useFlightShuffle */ false,
+            /* leftInputSchemaIpc */ null,
+            /* rightInputSchemaIpc */ null
         );
 
         List<InstructionNode> instr = consumer.getPlanAlternatives().get(0).instructions();
@@ -165,7 +170,19 @@ public class ShuffleEnrichmentTests extends OpenSearchTestCase {
         Stage consumer = new Stage(/* stageId */ 4, null, List.of(), null, null, null);
         consumer.setPlanAlternatives(List.of(new StagePlan(null, "df")));
 
-        ShuffleEnrichment.enrichWorkerAlternatives(consumer, /* partitionCount */ 2, 7, 3, "qid", 1, 2, /* preferHashJoin */ false);
+        ShuffleEnrichment.enrichWorkerAlternatives(
+            consumer,
+            /* partitionCount */ 2,
+            7,
+            3,
+            "qid",
+            1,
+            2,
+            /* preferHashJoin */ false,
+            /* useFlightShuffle */ false,
+            /* leftInputSchemaIpc */ null,
+            /* rightInputSchemaIpc */ null
+        );
 
         ShuffleWorkerSetupInstructionNode setup = (ShuffleWorkerSetupInstructionNode) consumer.getPlanAlternatives()
             .get(0)
@@ -177,6 +194,64 @@ public class ShuffleEnrichmentTests extends OpenSearchTestCase {
         assertEquals("qid", setup.getQueryId());
         assertEquals(4, setup.getTargetStageId());
         assertFalse("preferHashJoin flows through to the setup placeholder", setup.getPreferHashJoin());
+    }
+
+    public void testCascadeGateSingleLevelIsNotCascade() {
+        // One join level: two LEAF producers (stage 2, 3) shuffle into worker stage 1, which gathers to the
+        // coordinator. Neither producer is a worker and the worker feeds no higher level → NOT a cascade →
+        // Flight-eligible. This is the q5/q7/q10/q13/q20 shape.
+        ShuffleEnrichment.WorkerLevel level = level(/* worker */ 1, /* leftProducer */ 2, /* rightProducer */ 3);
+        Set<Integer> workerIds = Set.of(1);
+        Set<Integer> producerIds = Set.of(2, 3);
+        assertFalse(
+            "a single-level edge (leaf producers → coordinator gather) is not a cascade → Flight-eligible",
+            ShuffleEnrichment.isCascadeLevel(level, workerIds, producerIds)
+        );
+    }
+
+    public void testCascadeGateTwoLevelCascadeIsGated() {
+        // Two stacked levels: bottom level worker=2 (producers 4,5) shuffles UP into top level worker=1
+        // (producers 2,3). Worker 2 is BOTH a consumer (of 4,5) and a producer (to 1). The bottom level is a
+        // cascade because its worker (2) is a producer to the top level; the top level is a cascade because
+        // its left producer (2) is itself a worker. BOTH must be gated to the Java path (q11 shape).
+        Set<Integer> workerIds = Set.of(1, 2);
+        Set<Integer> producerIds = Set.of(2, 3, 4, 5);
+
+        ShuffleEnrichment.WorkerLevel top = level(/* worker */ 1, /* leftProducer */ 2, /* rightProducer */ 3);
+        assertTrue(
+            "top level whose left producer (2) is itself a worker is a cascade → Java path",
+            ShuffleEnrichment.isCascadeLevel(top, workerIds, producerIds)
+        );
+
+        ShuffleEnrichment.WorkerLevel bottom = level(/* worker */ 2, /* leftProducer */ 4, /* rightProducer */ 5);
+        assertTrue(
+            "bottom level whose worker (2) feeds a higher level is a cascade → Java path",
+            ShuffleEnrichment.isCascadeLevel(bottom, workerIds, producerIds)
+        );
+    }
+
+    public void testCascadeGateTwoIndependentSingleLevelsBothEligible() {
+        // Two INDEPENDENT single-level shuffles in one query: worker 1 (producers 3,4) and worker 2
+        // (producers 5,6). No worker is another level's producer and no producer is a worker → NEITHER is a
+        // cascade → both stay Flight-eligible. The gate is per level, not per query.
+        Set<Integer> workerIds = Set.of(1, 2);
+        Set<Integer> producerIds = Set.of(3, 4, 5, 6);
+        assertFalse(
+            "independent single-level shuffle A is not a cascade",
+            ShuffleEnrichment.isCascadeLevel(level(1, 3, 4), workerIds, producerIds)
+        );
+        assertFalse(
+            "independent single-level shuffle B is not a cascade",
+            ShuffleEnrichment.isCascadeLevel(level(2, 5, 6), workerIds, producerIds)
+        );
+    }
+
+    /** Builds a minimal WorkerLevel carrying just the three stage ids the cascade predicate reads. */
+    private static ShuffleEnrichment.WorkerLevel level(int workerId, int leftProducerId, int rightProducerId) {
+        Stage worker = new Stage(workerId, null, List.of(), null, null, null);
+        Stage leftProducer = new Stage(leftProducerId, null, List.of(), null, null, null);
+        Stage rightProducer = new Stage(rightProducerId, null, List.of(), null, null, null);
+        return new ShuffleEnrichment.WorkerLevel(worker, leftProducer, rightProducer, List.of(0), List.of(0), 3, List.of());
     }
 
     private static Stage newProducerStage(int stageId, int partitionCount, List<Integer> hashKeys) {

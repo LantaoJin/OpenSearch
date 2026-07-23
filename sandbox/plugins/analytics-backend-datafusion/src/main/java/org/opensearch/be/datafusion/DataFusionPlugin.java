@@ -11,6 +11,7 @@ package org.opensearch.be.datafusion;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.action.ActionRequest;
+import org.opensearch.analytics.AnalyticsSettings;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.spi.QueryExecutionMetrics;
 import org.opensearch.arrow.allocator.ArrowNativeAllocator;
@@ -494,10 +495,45 @@ public class DataFusionPlugin extends Plugin
     private volatile GetService getService;
     private volatile CircuitBreaker datafusionBreaker;
 
+    /** Node settings captured at construction (for {@link #additionalSettings()}, which runs before
+     *  {@code createComponents} and receives no arguments). {@code null} under the no-arg ctor. */
+    private final Settings nodeSettings;
+
     /**
-     * Creates the DataFusion plugin.
+     * No-arg form for tests / SPI paths that don't inject settings; {@link #additionalSettings()} then
+     * publishes nothing. Package-private (NOT public): OpenSearch's {@code PluginsService.loadPlugin}
+     * requires exactly ONE public constructor, so the node-bootstrap {@code (Settings, Path)} ctor is
+     * the sole public one; same-package tests still use this no-arg form.
      */
-    public DataFusionPlugin() {}
+    DataFusionPlugin() {
+        this.nodeSettings = null;
+    }
+
+    /**
+     * Node-bootstrap constructor. {@code PluginsService} invokes this {@code (Settings, Path)} form
+     * when present, giving {@link #additionalSettings()} access to the configured node settings so it
+     * can publish the native Flight port as a node attribute.
+     */
+    public DataFusionPlugin(Settings settings, Path configPath) {
+        this.nodeSettings = settings;
+    }
+
+    @Override
+    public Settings additionalSettings() {
+        // Publish this node's native shuffle Flight port as a DiscoveryNode attribute so producers on
+        // peer nodes can resolve targetWorkerNodeId -> http://host:port. Only when the transport is
+        // enabled AND a FIXED (non-zero) port is configured: node attributes are frozen at join, and
+        // additionalSettings() runs before the server binds, so an ephemeral (0) port can't be
+        // advertised — the producer then falls back to the Java shuffle path (see MPP_SHUFFLE_FLIGHT_PORT).
+        if (nodeSettings == null || !AnalyticsSettings.MPP_SHUFFLE_FLIGHT_ENABLED.get(nodeSettings)) {
+            return Settings.EMPTY;
+        }
+        int port = AnalyticsSettings.MPP_SHUFFLE_FLIGHT_PORT.get(nodeSettings);
+        if (port <= 0) {
+            return Settings.EMPTY;
+        }
+        return Settings.builder().put("node.attr." + AnalyticsSettings.FLIGHT_PORT_NODE_ATTR, port).build();
+    }
 
     @Override
     public Collection<Object> createComponents(

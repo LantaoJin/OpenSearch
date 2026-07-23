@@ -49,6 +49,8 @@ public class ShuffleScanInstructionNode implements InstructionNode {
     private final int targetStageId;
     private final String side;
     private final byte[] producerPlanBytes;
+    private final boolean usesFlightShuffle;
+    private final byte[] inputSchemaIpc;
 
     public ShuffleScanInstructionNode(
         String namedInputId,
@@ -70,6 +72,43 @@ public class ShuffleScanInstructionNode implements InstructionNode {
         String side,
         byte[] producerPlanBytes
     ) {
+        this(namedInputId, shufflePartitionIndex, expectedSenders, queryId, targetStageId, side, producerPlanBytes, false);
+    }
+
+    public ShuffleScanInstructionNode(
+        String namedInputId,
+        int shufflePartitionIndex,
+        int expectedSenders,
+        String queryId,
+        int targetStageId,
+        String side,
+        byte[] producerPlanBytes,
+        boolean usesFlightShuffle
+    ) {
+        this(
+            namedInputId,
+            shufflePartitionIndex,
+            expectedSenders,
+            queryId,
+            targetStageId,
+            side,
+            producerPlanBytes,
+            usesFlightShuffle,
+            null
+        );
+    }
+
+    public ShuffleScanInstructionNode(
+        String namedInputId,
+        int shufflePartitionIndex,
+        int expectedSenders,
+        String queryId,
+        int targetStageId,
+        String side,
+        byte[] producerPlanBytes,
+        boolean usesFlightShuffle,
+        byte[] inputSchemaIpc
+    ) {
         this.namedInputId = namedInputId;
         this.shufflePartitionIndex = shufflePartitionIndex;
         this.expectedSenders = expectedSenders;
@@ -77,6 +116,8 @@ public class ShuffleScanInstructionNode implements InstructionNode {
         this.targetStageId = targetStageId;
         this.side = side;
         this.producerPlanBytes = producerPlanBytes;
+        this.usesFlightShuffle = usesFlightShuffle;
+        this.inputSchemaIpc = inputSchemaIpc;
     }
 
     public ShuffleScanInstructionNode(StreamInput in) throws IOException {
@@ -87,6 +128,8 @@ public class ShuffleScanInstructionNode implements InstructionNode {
         this.targetStageId = in.readVInt();
         this.side = in.readString();
         this.producerPlanBytes = in.readBoolean() ? in.readByteArray() : null;
+        this.usesFlightShuffle = in.readBoolean();
+        this.inputSchemaIpc = in.readBoolean() ? in.readByteArray() : null;
     }
 
     public String getNamedInputId() {
@@ -124,6 +167,25 @@ public class ShuffleScanInstructionNode implements InstructionNode {
         return producerPlanBytes;
     }
 
+    /** True when the PRODUCER for this stage ships over the Rust-native Flight shuffle transport, so
+     *  the consumer must register a Flight route instead of the Java shuffle-buffer path. Defaults
+     *  false: the coordinator only sets this once the Flight producer seam is wired for the query, so
+     *  a Flight-server-enabled node still uses the Java path until then — a Flight consumer without a
+     *  Flight producer would hang. */
+    public boolean usesFlightShuffle() {
+        return usesFlightShuffle;
+    }
+
+    /** Arrow IPC schema of this shuffle input, or {@code null}. Set (for the join-shuffle Flight path)
+     *  when {@link #usesFlightShuffle()} is true and there is no {@link #getProducerPlanBytes()} to
+     *  derive the schema from: the Flight consumer registers its {@code StreamingTable} BEFORE any
+     *  batch arrives (no buffered first chunk to peek), so the coordinator must supply the schema up
+     *  front. Null on the Java path (schema peeked from the first buffered chunk) and on the agg-shuffle
+     *  Flight path (schema derived from {@code producerPlanBytes}). */
+    public byte[] getInputSchemaIpc() {
+        return inputSchemaIpc;
+    }
+
     @Override
     public InstructionType type() {
         return InstructionType.SHUFFLE_SCAN;
@@ -140,6 +202,13 @@ public class ShuffleScanInstructionNode implements InstructionNode {
         if (producerPlanBytes != null) {
             out.writeBoolean(true);
             out.writeByteArray(producerPlanBytes);
+        } else {
+            out.writeBoolean(false);
+        }
+        out.writeBoolean(usesFlightShuffle);
+        if (inputSchemaIpc != null) {
+            out.writeBoolean(true);
+            out.writeByteArray(inputSchemaIpc);
         } else {
             out.writeBoolean(false);
         }

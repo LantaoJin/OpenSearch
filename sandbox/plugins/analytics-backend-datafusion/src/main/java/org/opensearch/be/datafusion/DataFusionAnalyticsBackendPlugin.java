@@ -1097,6 +1097,16 @@ public class DataFusionAnalyticsBackendPlugin implements AnalyticsSearchBackendP
         }
     }
 
+    @Override
+    public void clearShuffleQuery(String queryId) {
+        // Fail + drop every native Flight shuffle route this query left on the node, so a cancelled or
+        // crashed producer can't leak a route or hang a parked consumer. No-op (returns 0) when the
+        // Flight transport is disabled or the query used no Flight routes.
+        if (queryId != null && !queryId.isEmpty()) {
+            NativeBridge.clearFlightShuffleQuery(queryId);
+        }
+    }
+
     public Exception convertException(Exception original) {
         return NativeErrorConverter.convert(original);
     }

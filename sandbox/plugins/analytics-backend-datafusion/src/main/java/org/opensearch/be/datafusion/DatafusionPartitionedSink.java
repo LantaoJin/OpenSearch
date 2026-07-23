@@ -18,6 +18,7 @@ import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.arrow.vector.ipc.message.IpcOption;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.backend.EngineResultStream;
 import org.opensearch.analytics.spi.ExchangeSink;
 import org.opensearch.analytics.spi.ShuffleSender;
 import org.opensearch.be.datafusion.nativelib.NativeBridge;
@@ -115,6 +116,33 @@ public final class DatafusionPartitionedSink implements ExchangeSink {
         this.sender = sender;
         this.logTag = logTag;
         this.compression = compression;
+    }
+
+    @Override
+    public boolean drainViaFlight(
+        EngineResultStream stream,
+        List<String> targetUris,
+        List<Integer> hashKeyChannels,
+        String queryId,
+        int stageId,
+        String side
+    ) {
+        // Flight drain only applies to a native DataFusion stream — the pointer it exposes is what
+        // the native shuffle drains. Any other stream type falls back to the feed() loop.
+        if (!(stream instanceof DatafusionResultStream dfStream)) {
+            return false;
+        }
+        long streamPtr = dfStream.nativeStreamPointer();
+        if (streamPtr == 0) {
+            return false;
+        }
+        int[] keys = hashKeyChannels.stream().mapToInt(Integer::intValue).toArray();
+        String[] uris = targetUris.toArray(new String[0]);
+        // Blocks until the stream is fully drained and every target's transfer completes. Throws
+        // (via NativeBridge) on any partition/encode/transport error, which propagates up to fail
+        // the producer fragment. Does NOT close the stream handle — the caller owns it.
+        NativeBridge.executeFlightShuffle(streamPtr, keys, uris, queryId, stageId, side);
+        return true;
     }
 
     @Override

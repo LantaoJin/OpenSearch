@@ -14,6 +14,8 @@ import org.opensearch.analytics.backend.SearchExecEngine;
 import org.opensearch.analytics.backend.ShardScanExecutionContext;
 import org.opensearch.analytics.spi.ExchangeSink;
 
+import java.util.List;
+
 /**
  * Holds the per-fragment resources (reader context, engine, result stream) kept alive for
  * the duration of a streaming fragment execution, and releases them in reverse order on close.
@@ -47,6 +49,24 @@ public final class FragmentResources implements AutoCloseable {
      * (QTF query phase); close then keeps the reader in the store for that fetch.
      */
     private final boolean requiresTopDocs;
+    /**
+     * Non-null only for a hash-shuffle producer fragment whose output ships over the Rust-native
+     * Arrow-Flight shuffle transport: the resolved per-partition target Flight URIs plus the
+     * partitioning key/route parameters. The drain site passes these to
+     * {@link ExchangeSink#drainViaFlight}; when null the producer drains through the Java
+     * {@link ExchangeSink#feed} loop (the default when Flight is disabled or a target's Flight port
+     * is unpublished).
+     */
+    private final FlightShuffleDrain flightShuffleDrain;
+
+    /**
+     * Resolved parameters for draining a hash-shuffle producer's output over the Rust-native
+     * Arrow-Flight transport. {@code targetUris.get(p)} is the Flight endpoint for partition
+     * {@code p}; the {@code (queryId, stageId, side)} triple plus the partition index key each
+     * route on the consumer side.
+     */
+    public record FlightShuffleDrain(List<String> targetUris, List<Integer> hashKeyChannels, String queryId, int stageId, String side) {
+    }
 
     public FragmentResources(
         ReaderContextStore readerContextStore,
@@ -56,7 +76,7 @@ public final class FragmentResources implements AutoCloseable {
         Runnable onClose,
         boolean requiresTopDocs
     ) {
-        this(readerContextStore, readerContext, engine, stream, onClose, null, requiresTopDocs, null, null);
+        this(readerContextStore, readerContext, engine, stream, onClose, null, requiresTopDocs, null, null, null);
     }
 
     public FragmentResources(
@@ -68,7 +88,7 @@ public final class FragmentResources implements AutoCloseable {
         BigIntVector rowIdVector,
         boolean requiresTopDocs
     ) {
-        this(readerContextStore, readerContext, engine, stream, onClose, rowIdVector, requiresTopDocs, null, null);
+        this(readerContextStore, readerContext, engine, stream, onClose, rowIdVector, requiresTopDocs, null, null, null);
     }
 
     /**
@@ -93,13 +113,42 @@ public final class FragmentResources implements AutoCloseable {
         ExchangeSink partitionedSink,
         ShardScanExecutionContext executionContext
     ) {
-        this(readerContextStore, readerContext, engine, stream, onClose, rowIdVector, false, partitionedSink, executionContext);
+        this(readerContextStore, readerContext, engine, stream, onClose, rowIdVector, false, partitionedSink, executionContext, null);
+    }
+
+    /**
+     * Producer-path constructor that also carries the Flight-shuffle drain spec (null when the
+     * producer drains over the Java shuffle transport). Delegates with {@code requiresTopDocs=false}.
+     */
+    public FragmentResources(
+        ReaderContextStore readerContextStore,
+        ReaderContext readerContext,
+        SearchExecEngine<ShardScanExecutionContext, EngineResultStream> engine,
+        EngineResultStream stream,
+        Runnable onClose,
+        BigIntVector rowIdVector,
+        ExchangeSink partitionedSink,
+        ShardScanExecutionContext executionContext,
+        FlightShuffleDrain flightShuffleDrain
+    ) {
+        this(
+            readerContextStore,
+            readerContext,
+            engine,
+            stream,
+            onClose,
+            rowIdVector,
+            false,
+            partitionedSink,
+            executionContext,
+            flightShuffleDrain
+        );
     }
 
     /**
      * Full constructor. Upstream's {@code requiresTopDocs} is kept ahead of our MPP-shuffle params
-     * ({@code partitionedSink}, {@code executionContext}) per the "our params to the END of
-     * upstream-owned signatures" convention.
+     * ({@code partitionedSink}, {@code executionContext}, {@code flightShuffleDrain}) per the "our
+     * params to the END of upstream-owned signatures" convention.
      */
     public FragmentResources(
         ReaderContextStore readerContextStore,
@@ -110,7 +159,8 @@ public final class FragmentResources implements AutoCloseable {
         BigIntVector rowIdVector,
         boolean requiresTopDocs,
         ExchangeSink partitionedSink,
-        ShardScanExecutionContext executionContext
+        ShardScanExecutionContext executionContext,
+        FlightShuffleDrain flightShuffleDrain
     ) {
         assert assertCtorInvariants(readerContextStore, readerContext);
         this.readerContextStore = readerContextStore;
@@ -122,6 +172,7 @@ public final class FragmentResources implements AutoCloseable {
         this.requiresTopDocs = requiresTopDocs;
         this.partitionedSink = partitionedSink;
         this.executionContext = executionContext;
+        this.flightShuffleDrain = flightShuffleDrain;
     }
 
     private static boolean assertCtorInvariants(ReaderContextStore store, ReaderContext ctx) {
@@ -142,6 +193,12 @@ public final class FragmentResources implements AutoCloseable {
 
     public ShardScanExecutionContext executionContext() {
         return executionContext;
+    }
+
+    /** Non-null iff this producer fragment ships over the Rust-native Flight shuffle transport; the
+     *  drain site hands these to {@link ExchangeSink#drainViaFlight}. */
+    public FlightShuffleDrain flightShuffleDrain() {
+        return flightShuffleDrain;
     }
 
     /**

@@ -95,6 +95,49 @@ pub extern "C" fn df_shutdown_runtime_manager() {
     }
 }
 
+/// Starts the per-node Rust-native shuffle Flight server on the IO runtime and returns the ACTUAL
+/// bound port (so Java can publish it). `port = 0` requests an ephemeral port. Replaces any
+/// previously-running server. Errors (bind failure, runtime not initialized) surface through the FFM
+/// `?` wrapper as a negative-encoded error pointer.
+///
+/// Java: NativeBridge.startFlightShuffleServer(int) -> int
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn df_start_flight_shuffle_server(port: i32) -> i64 {
+    let mgr = get_rt_manager()?;
+    let bound = crate::flight_shuffle::start_on_runtime(mgr.io_runtime.handle(), port as u16)?;
+    Ok(bound as i64)
+}
+
+/// Stops and clears the per-node shuffle Flight server. Idempotent. Java: NativeBridge.stopFlightShuffleServer().
+#[no_mangle]
+pub extern "C" fn df_stop_flight_shuffle_server() {
+    crate::flight_shuffle::stop_node();
+}
+
+/// Returns 1 if the per-node shuffle Flight server is running, else 0. The consumer handler uses this
+/// as the single source of truth for whether to take the Flight path vs the Java shuffle path.
+/// Java: NativeBridge.isFlightShuffleServerRunning().
+#[no_mangle]
+pub extern "C" fn df_flight_shuffle_server_running() -> i64 {
+    if crate::flight_shuffle::node().is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Fail + drop every Flight shuffle route for `query_id` on this node (query-cancel / terminal
+/// cleanup — the Flight analog of `ShuffleBufferManager.clearForQuery`). Returns the count cleared, or
+/// the ffm_safe error sentinel. Java: NativeBridge.clearFlightShuffleQuery(String).
+#[ffm_safe]
+#[no_mangle]
+pub unsafe extern "C" fn df_clear_flight_shuffle_query(query_id_ptr: *const u8, query_id_len: i64) -> i64 {
+    let query_id =
+        str_from_raw(query_id_ptr, query_id_len).map_err(|e| format!("df_clear_flight_shuffle_query: {}", e))?;
+    Ok(crate::flight_shuffle::clear_query(query_id) as i64)
+}
+
 /// Updates the effective permit count of a named concurrency gate.
 /// Gate names: "fragment_executor" (targets DedicatedExecutor gate).
 ///
@@ -457,6 +500,67 @@ pub unsafe extern "C" fn df_stream_next(stream_ptr: i64) -> i64 {
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_close(stream_ptr: i64) {
     api::stream_close(stream_ptr);
+}
+
+/// Producer seam: drain the stage's native output stream straight into the Rust-native Flight shuffle
+/// (hash-partition + per-partition Flight push), instead of the `df_stream_next` pull into Java + the
+/// `DatafusionPartitionedSink` IPC/transport tail. Blocks on the IO runtime until fully drained.
+/// `target_uris_ptr`/`target_uris_len_ptr` are `partition_count` parallel (ptr,len) UTF-8 strings
+/// (`http://host:port` per partition); the shared `(query_id, stage_id, side)` + partition index form
+/// each `ShuffleKey`. Returns 0 on success, ffm_safe error sentinel otherwise. Does NOT free the
+/// stream handle — the caller frees it via `df_stream_close` afterward.
+///
+/// Java: NativeBridge.executeFlightShuffle(...)
+#[ffm_safe]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn df_execute_flight_shuffle(
+    stream_ptr: i64,
+    hash_key_indices_ptr: *const i32,
+    hash_key_indices_len: i64,
+    target_uris_ptr: *const *const u8,
+    target_uris_len_ptr: *const i64,
+    partition_count: i64,
+    query_id_ptr: *const u8,
+    query_id_len: i64,
+    stage_id: i32,
+    side_ptr: *const u8,
+    side_len: i64,
+) -> i64 {
+    let n_keys = hash_key_indices_len as usize;
+    let hash_key_indices: Vec<usize> = if n_keys == 0 {
+        Vec::new()
+    } else {
+        slice::from_raw_parts(hash_key_indices_ptr, n_keys)
+            .iter()
+            .map(|&k| k as usize)
+            .collect()
+    };
+    let mut target_uris = Vec::with_capacity(partition_count as usize);
+    for i in 0..partition_count as usize {
+        let ptr = *target_uris_ptr.add(i);
+        let len = *target_uris_len_ptr.add(i);
+        target_uris.push(
+            str_from_raw(ptr, len)
+                .map_err(|e| format!("df_execute_flight_shuffle: target_uri[{}]: {}", i, e))?
+                .to_string(),
+        );
+    }
+    let query_id = str_from_raw(query_id_ptr, query_id_len)
+        .map_err(|e| format!("df_execute_flight_shuffle: query_id: {}", e))?
+        .to_string();
+    let side = str_from_raw(side_ptr, side_len)
+        .map_err(|e| format!("df_execute_flight_shuffle: side: {}", e))?
+        .to_string();
+
+    let mgr = get_rt_manager()?;
+    let io_handle = mgr.io_runtime.handle().clone();
+    timed_block_on(
+        &mgr.io_runtime,
+        "execute_flight_shuffle",
+        api::execute_flight_shuffle(stream_ptr, hash_key_indices, target_uris, query_id, stage_id, side, io_handle),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Returns execution metrics as JSON bytes for the given stream.
@@ -872,6 +976,93 @@ pub unsafe extern "C" fn df_register_partition_stream_on_session_context_from_pa
     let partial_plan = slice::from_raw_parts(partial_plan_ptr, partial_plan_len as usize);
     api::register_partition_stream_on_session_context_from_partial_plan(session_ctx_handle_ptr, input_id, partial_plan)
         .map_err(|e| e.to_string())
+}
+
+/// Rust-native Flight shuffle CONSUMER seam. Registers the `StreamingTable` under `input_id`
+/// like `df_register_partition_stream_on_session_context`, but parks the sender in the node-global
+/// Flight route registry under `(query_id, stage_id, partition, side)` instead of returning it —
+/// inbound Flight `do_put`s feed the table directly (no Java buffer / drain-thread / senderSend).
+/// Returns `0` on success; the FFM error sentinel on failure (caller falls back to the Java path).
+///
+/// Java: NativeBridge.registerFlightPartitionStreamOnSessionContext(...)
+#[ffm_safe]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn df_register_flight_partition_stream_on_session_context(
+    session_ctx_handle_ptr: i64,
+    input_id_ptr: *const u8,
+    input_id_len: i64,
+    schema_ipc_ptr: *const u8,
+    schema_ipc_len: i64,
+    query_id_ptr: *const u8,
+    query_id_len: i64,
+    stage_id: i32,
+    partition: i32,
+    side_ptr: *const u8,
+    side_len: i64,
+    expected_senders: i32,
+) -> i64 {
+    let input_id = str_from_raw(input_id_ptr, input_id_len)
+        .map_err(|e| format!("df_register_flight_partition_stream_on_session_context: input_id: {}", e))?;
+    let query_id = str_from_raw(query_id_ptr, query_id_len)
+        .map_err(|e| format!("df_register_flight_partition_stream_on_session_context: query_id: {}", e))?;
+    let side = str_from_raw(side_ptr, side_len)
+        .map_err(|e| format!("df_register_flight_partition_stream_on_session_context: side: {}", e))?;
+    let schema_ipc = slice::from_raw_parts(schema_ipc_ptr, schema_ipc_len as usize);
+    api::register_flight_partition_stream_on_session_context(
+        session_ctx_handle_ptr,
+        input_id,
+        schema_ipc,
+        query_id,
+        stage_id,
+        partition,
+        side,
+        expected_senders,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Agg-shuffle variant of `df_register_flight_partition_stream_on_session_context`: derives the
+/// logical-named table schema from the producer's PARTIAL substrait plan (the q1/q15 by-name-bind
+/// fix) before parking the Flight route. Java: NativeBridge.registerFlightPartitionStreamOnSessionContextFromPartialPlan(...)
+#[ffm_safe]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn df_register_flight_partition_stream_on_session_context_from_partial_plan(
+    session_ctx_handle_ptr: i64,
+    input_id_ptr: *const u8,
+    input_id_len: i64,
+    partial_plan_ptr: *const u8,
+    partial_plan_len: i64,
+    query_id_ptr: *const u8,
+    query_id_len: i64,
+    stage_id: i32,
+    partition: i32,
+    side_ptr: *const u8,
+    side_len: i64,
+    expected_senders: i32,
+) -> i64 {
+    let input_id = str_from_raw(input_id_ptr, input_id_len).map_err(|e| {
+        format!("df_register_flight_partition_stream_on_session_context_from_partial_plan: input_id: {}", e)
+    })?;
+    let query_id = str_from_raw(query_id_ptr, query_id_len).map_err(|e| {
+        format!("df_register_flight_partition_stream_on_session_context_from_partial_plan: query_id: {}", e)
+    })?;
+    let side = str_from_raw(side_ptr, side_len).map_err(|e| {
+        format!("df_register_flight_partition_stream_on_session_context_from_partial_plan: side: {}", e)
+    })?;
+    let partial_plan = slice::from_raw_parts(partial_plan_ptr, partial_plan_len as usize);
+    api::register_flight_partition_stream_on_session_context_from_partial_plan(
+        session_ctx_handle_ptr,
+        input_id,
+        partial_plan,
+        query_id,
+        stage_id,
+        partition,
+        side,
+        expected_senders,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Hash-partitions one Arrow C Data batch into N output batches using DataFusion's

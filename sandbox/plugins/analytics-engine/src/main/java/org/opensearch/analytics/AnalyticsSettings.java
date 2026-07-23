@@ -355,6 +355,49 @@ public final class AnalyticsSettings {
         Setting.Property.Dynamic
     );
 
+    /**
+     * Master switch for the Rust-native Arrow-Flight shuffle transport. When {@code true}, each data
+     * node binds a native tonic Flight server on {@link #MPP_SHUFFLE_FLIGHT_PORT} at startup and the
+     * hash-shuffle data path moves producer→consumer batches Rust↔Rust over Flight/gRPC (no
+     * {@code Rust→Java→Rust} hop, no on-heap buffer-all). When {@code false} (default), the shuffle
+     * uses the Java-buffered {@code AnalyticsShuffleDataAction} path unchanged.
+     *
+     * <p>Not {@code Dynamic}: the server binds at node start, so a change requires a restart. Gated
+     * under {@link #MPP_ENABLED}; harmless when MPP is off (no shuffle runs).
+     */
+    public static final Setting<Boolean> MPP_SHUFFLE_FLIGHT_ENABLED = Setting.boolSetting(
+        "analytics.mpp.shuffle.flight.enabled",
+        false,
+        Setting.Property.NodeScope
+    );
+
+    /**
+     * Port the native shuffle Flight server binds on each data node (see
+     * {@link #MPP_SHUFFLE_FLIGHT_ENABLED}). Default {@code 0} = OS-assigned ephemeral port — fine for a
+     * single node / tests, but a CROSS-NODE Flight shuffle needs a FIXED (non-zero) port: producers
+     * resolve a peer's Flight endpoint from the {@value #FLIGHT_PORT_NODE_ATTR} node attribute, which
+     * is published at node bootstrap (before the server binds), so it can only carry a statically
+     * configured port. With the default {@code 0}, the attribute is absent and producers fall back to
+     * the Java shuffle path. Node-scoped, non-dynamic (bound once at start).
+     */
+    public static final Setting<Integer> MPP_SHUFFLE_FLIGHT_PORT = Setting.intSetting(
+        "analytics.mpp.shuffle.flight.port",
+        0,
+        0,
+        65535,
+        Setting.Property.NodeScope
+    );
+
+    /**
+     * DiscoveryNode attribute (published via {@code node.attr.<name>}) carrying a data node's native
+     * shuffle Flight port, so a producer can resolve a target nodeId → {@code http://host:port}. Only
+     * published when {@link #MPP_SHUFFLE_FLIGHT_ENABLED} is on AND {@link #MPP_SHUFFLE_FLIGHT_PORT} is a
+     * fixed non-zero port (node attributes are immutable after join, so an ephemeral port — not known
+     * until after bind — cannot be advertised this way). Read via
+     * {@code DiscoveryNode.getAttributes().get(FLIGHT_PORT_NODE_ATTR)}.
+     */
+    public static final String FLIGHT_PORT_NODE_ATTR = "analytics_flight_port";
+
     /** All engine-level settings registered by {@code AnalyticsPlugin.getSettings()}. */
     public static final List<Setting<?>> ALL_SETTINGS = List.of(
         MPP_ENABLED,
@@ -373,6 +416,8 @@ public final class AnalyticsSettings {
         MPP_SHUFFLE_PRUNE_COLUMNS,
         MPP_SHUFFLE_COMPRESS,
         MPP_COMPRESSION_CODEC,
-        MPP_COMPRESSION_ZSTD_LEVEL
+        MPP_COMPRESSION_ZSTD_LEVEL,
+        MPP_SHUFFLE_FLIGHT_ENABLED,
+        MPP_SHUFFLE_FLIGHT_PORT
     );
 }

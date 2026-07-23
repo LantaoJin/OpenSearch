@@ -10,6 +10,7 @@ package org.opensearch.be.datafusion;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.analytics.AnalyticsSettings;
 import org.opensearch.be.datafusion.cache.CacheManager;
 import org.opensearch.be.datafusion.cache.CacheUtils;
 import org.opensearch.be.datafusion.cache.NativeCacheManagerHandle;
@@ -52,6 +53,13 @@ public class DataFusionService extends AbstractLifecycleComponent {
 
     /** Handle to the native DataFusion global runtime (memory pool + cache). */
     private volatile NativeRuntimeHandle runtimeHandle;
+
+    /**
+     * Actual bound port of this node's Rust-native shuffle Flight server, or {@code -1} if the
+     * transport is disabled ({@link AnalyticsSettings#MPP_SHUFFLE_FLIGHT_ENABLED}). Set in
+     * {@link #doStart()}; published for producers to target.
+     */
+    private volatile int flightShufflePort = -1;
 
     /** Cache manager for pre-warming and managing native caches. */
     private volatile CacheManager cacheManager;
@@ -114,13 +122,39 @@ public class DataFusionService extends AbstractLifecycleComponent {
             this.cacheManager = new CacheManager(runtimeHandle);
         }
 
+        // Rust-native shuffle Flight server: bind on the native IO runtime if enabled. The bound port
+        // is published for producers to target. Non-dynamic — bound once here. Failure to bind is not
+        // fatal: log and leave the port at -1 so the query layer stays on the Java shuffle path.
+        if (clusterSettings != null && clusterSettings.get(AnalyticsSettings.MPP_SHUFFLE_FLIGHT_ENABLED)) {
+            int requestedPort = clusterSettings.get(AnalyticsSettings.MPP_SHUFFLE_FLIGHT_PORT);
+            try {
+                this.flightShufflePort = NativeBridge.startFlightShuffleServer(requestedPort);
+                logger.info("Rust-native shuffle Flight server bound on port {}", flightShufflePort);
+            } catch (Exception e) {
+                logger.warn("Failed to start Rust-native shuffle Flight server; staying on Java shuffle path", e);
+                this.flightShufflePort = -1;
+            }
+        }
+
         logger.debug("DataFusion service started — memory pool {}B, spill limit {}B", memoryPoolLimit, spillMemoryLimit);
+    }
+
+    /**
+     * Actual bound port of this node's Rust-native shuffle Flight server, or {@code -1} if the
+     * transport is disabled or failed to bind. Published for producers to target.
+     */
+    public int flightShufflePort() {
+        return flightShufflePort;
     }
 
     @Override
     protected void doStop() {
         logger.debug("Stopping DataFusion service");
         try {
+            if (flightShufflePort >= 0) {
+                NativeBridge.stopFlightShuffleServer();
+                flightShufflePort = -1;
+            }
             releaseRuntime();
         } finally {
             NativeBridge.shutdownTokioRuntimeManager();
@@ -131,6 +165,10 @@ public class DataFusionService extends AbstractLifecycleComponent {
 
     @Override
     protected void doClose() throws IOException {
+        if (flightShufflePort >= 0) {
+            NativeBridge.stopFlightShuffleServer();
+            flightShufflePort = -1;
+        }
         releaseRuntime();
         NativeBridge.shutdownTokioRuntimeManager();
     }

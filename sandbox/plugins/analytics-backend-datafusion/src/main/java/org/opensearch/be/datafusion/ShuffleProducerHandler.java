@@ -67,7 +67,8 @@ public class ShuffleProducerHandler implements FragmentInstructionHandler<Shuffl
             node.getQueryId(),
             node.getTargetStageId(),
             node.getSide(),
-            backendContext
+            backendContext,
+            node.usesFlightShuffle()
         );
     }
 }

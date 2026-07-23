@@ -120,6 +120,22 @@ public class ShuffleScanHandler implements FragmentInstructionHandler<ShuffleSca
             );
         }
 
+        // Rust-native Flight shuffle path. Register a Flight route instead of the Java buffer-all +
+        // drain-thread + senderSend path: the native server pushes producer batches straight into the
+        // StreamingTable — no awaitReady barrier, no ShuffleBufferManager staging, no per-batch FFI.
+        // Fan-in is handled by expectedSenders.
+        //
+        // GATE: this consumer branch may ONLY be taken when the PRODUCER for this stage also ships over
+        // Flight — otherwise the consumer registers a Flight route and waits for a `do_put` that never
+        // arrives (the producer still uses AnalyticsShuffleDataAction) → hang. The coordinator sets
+        // usesFlightShuffle on the instruction once the producer is wired for Flight; until then it is
+        // false and we stay on the Java path even when the server is running. Server-running alone is
+        // NOT sufficient.
+        if (NativeBridge.isFlightShuffleServerRunning() && node.usesFlightShuffle()) {
+            registerFlightRoute(node, sessionState, inputId, side);
+            return backendContext;
+        }
+
         ShuffleBufferAccess buffer = registry.getOrCreate(node.getQueryId(), node.getTargetStageId(), node.getShufflePartitionIndex());
         // expectedSenders for both sides are set eagerly by the ShuffleWorkerSetupHandler
         // (which runs before any ShuffleScanHandler) so the buffer knows BOTH sides' counts
@@ -313,6 +329,87 @@ public class ShuffleScanHandler implements FragmentInstructionHandler<ShuffleSca
         drainThread.start();
 
         return backendContext;
+    }
+
+    /**
+     * Rust-native Flight shuffle consumer seam. Registers the {@code StreamingTable} under
+     * {@code inputId} and parks its sender in the node's Flight route registry keyed by
+     * {@code (queryId, stageId, partition, side)}, so inbound Flight {@code do_put}s feed it directly.
+     * No buffer-all, no drain thread, no per-batch FFI.
+     *
+     * <p><b>Schema sourcing.</b> The route must register with the input schema BEFORE any batch
+     * arrives (the worker plan binds the NamedScan up front). The agg-shuffle path derives it from the
+     * producer's PARTIAL plan ({@code producerPlanBytes}) — no data needed. The join-shuffle path needs
+     * the coordinator to thread the input schema onto the scan instruction (the Flight model has no
+     * buffered first chunk to peek); until that lands a join-shuffle Flight route is rejected, and the
+     * gate above keeps such stages on the Java path.
+     */
+    private static void registerFlightRoute(
+        ShuffleScanInstructionNode node,
+        DataFusionSessionState sessionState,
+        String inputId,
+        String side
+    ) {
+        long sessionPtr = sessionState.sessionContextHandle().getPointer();
+        byte[] producerPlanBytes = node.getProducerPlanBytes();
+        if (producerPlanBytes != null) {
+            // Agg-shuffle: logical-named schema from the PARTIAL plan (the q1/q15 by-name-bind fix).
+            NativeBridge.registerFlightPartitionStreamOnSessionContextFromPartialPlan(
+                sessionPtr,
+                inputId,
+                producerPlanBytes,
+                node.getQueryId(),
+                node.getTargetStageId(),
+                node.getShufflePartitionIndex(),
+                side,
+                node.getExpectedSenders()
+            );
+            LOGGER.debug(
+                "ShuffleScanHandler: registered Flight agg-route {} (queryId={}, stage={}, part={}, side={}, expectedSenders={})",
+                inputId,
+                node.getQueryId(),
+                node.getTargetStageId(),
+                node.getShufflePartitionIndex(),
+                side,
+                node.getExpectedSenders()
+            );
+            return;
+        }
+        // Join-shuffle: the coordinator threads the input Arrow-IPC schema onto the instruction (the
+        // Flight model has no buffered first chunk to peek), so register the StreamingTable directly
+        // from it. The producer ships raw rows whose names already match the consumer input — no
+        // re-lowering needed (unlike the agg path's partial-state names).
+        byte[] schemaIpc = node.getInputSchemaIpc();
+        if (schemaIpc == null || schemaIpc.length == 0) {
+            throw new IllegalStateException(
+                "ShuffleScanHandler: Flight join-shuffle route has no inputSchemaIpc on the instruction "
+                    + "(coordinator must set it when usesFlightShuffle=true and producerPlanBytes is null). "
+                    + "(namedInputId="
+                    + inputId
+                    + ", side="
+                    + side
+                    + ")"
+            );
+        }
+        NativeBridge.registerFlightPartitionStreamOnSessionContext(
+            sessionPtr,
+            inputId,
+            schemaIpc,
+            node.getQueryId(),
+            node.getTargetStageId(),
+            node.getShufflePartitionIndex(),
+            side,
+            node.getExpectedSenders()
+        );
+        LOGGER.debug(
+            "ShuffleScanHandler: registered Flight join-route {} (queryId={}, stage={}, part={}, side={}, expectedSenders={})",
+            inputId,
+            node.getQueryId(),
+            node.getTargetStageId(),
+            node.getShufflePartitionIndex(),
+            side,
+            node.getExpectedSenders()
+        );
     }
 
     /**
