@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.parquet.fields;
+package org.opensearch.dataformat.arrow.fields;
 
 import org.opensearch.index.mapper.BinaryFieldMapper;
 import org.opensearch.index.mapper.BooleanFieldMapper;
@@ -47,7 +47,7 @@ public class ArrowFieldRegistryTests extends OpenSearchTestCase {
             IpFieldMapper.CONTENT_TYPE,
             BinaryFieldMapper.CONTENT_TYPE, };
         for (String type : expectedTypes) {
-            assertNotNull("Missing registration for: " + type, ArrowFieldRegistry.getParquetField(type));
+            assertNotNull("Missing registration for: " + type, ArrowFieldRegistry.getArrowField(type));
         }
     }
 
@@ -61,16 +61,16 @@ public class ArrowFieldRegistryTests extends OpenSearchTestCase {
             SeqNoFieldMapper.CONTENT_TYPE,
             VersionFieldMapper.CONTENT_TYPE, };
         for (String type : expectedTypes) {
-            assertNotNull("Missing registration for: " + type, ArrowFieldRegistry.getParquetField(type));
+            assertNotNull("Missing registration for: " + type, ArrowFieldRegistry.getArrowField(type));
         }
     }
 
     public void testUnknownFieldTypeReturnsNull() {
-        assertNull(ArrowFieldRegistry.getParquetField("nonexistent_type"));
+        assertNull(ArrowFieldRegistry.getArrowField("nonexistent_type"));
     }
 
     public void testGetRegisteredFieldsIsUnmodifiable() {
-        Map<String, ParquetField> fields = ArrowFieldRegistry.getRegisteredFields();
+        Map<String, ArrowField> fields = ArrowFieldRegistry.getRegisteredFields();
         expectThrows(UnsupportedOperationException.class, () -> fields.put("test", null));
     }
 }

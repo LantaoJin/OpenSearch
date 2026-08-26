@@ -79,7 +79,7 @@ public class ParquetMergeIntegrationTests extends OpenSearchTestCase {
         RustBridge.mergeParquetFilesInRust(List.of(Path.of(file1), Path.of(file2), Path.of(file3)), mergedFile, INDEX_NAME, 0L);
 
         // 4. Verify merged output
-        ParquetFileMetadata mergedMeta = RustBridge.getFileMetadata(mergedFile);
+        FormatFileMetadata mergedMeta = RustBridge.getFileMetadata(mergedFile);
         assertEquals(9, mergedMeta.numRows());
 
         // 5. Cleanup
@@ -125,7 +125,7 @@ public class ParquetMergeIntegrationTests extends OpenSearchTestCase {
      */
     private String createSortedFile(Path dir, String name, long[] timestamps, String[] messages) throws Exception {
         String filePath = dir.resolve(name).toString();
-        ParquetSortConfig sortConfig = new ParquetSortConfig(List.of("timestamp"), List.of(false), List.of(false));
+        FormatSortConfig sortConfig = new FormatSortConfig(List.of("timestamp"), List.of(false), List.of(false));
 
         try (ArrowExport schemaExport = exportSchema()) {
             NativeParquetWriter writer = new NativeParquetWriter(filePath);

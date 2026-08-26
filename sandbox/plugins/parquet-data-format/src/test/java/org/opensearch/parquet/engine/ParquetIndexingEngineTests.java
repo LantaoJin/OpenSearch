@@ -31,9 +31,9 @@ import org.opensearch.parquet.ParquetBaseTests;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.RustBridge;
-import org.opensearch.parquet.fields.ArrowFieldRegistry;
-import org.opensearch.parquet.fields.ParquetField;
-import org.opensearch.parquet.writer.ParquetDocumentInput;
+import org.opensearch.dataformat.arrow.fields.ArrowFieldRegistry;
+import org.opensearch.dataformat.arrow.fields.ArrowField;
+import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
 import org.opensearch.threadpool.FixedExecutorBuilder;
 import org.opensearch.threadpool.ThreadPool;
 
@@ -95,10 +95,10 @@ public class ParquetIndexingEngineTests extends ParquetBaseTests {
     }
 
     public void testCreateWriterAndFlush() throws Exception {
-        Writer<ParquetDocumentInput> writer = engine.createWriter(new WriterConfig(1L));
+        Writer<ArrowDocumentInput> writer = engine.createWriter(new WriterConfig(1L));
 
         for (int i = 0; i < 5; i++) {
-            ParquetDocumentInput doc = engine.newDocumentInput();
+            ArrowDocumentInput doc = engine.newDocumentInput();
             populateMetadataFields(doc);
             doc.addField(idField, i);
             doc.addField(nameField, "user_" + i);
@@ -116,8 +116,8 @@ public class ParquetIndexingEngineTests extends ParquetBaseTests {
 
     public void testMultipleWriterGenerations() throws Exception {
         for (long gen = 1; gen <= 3; gen++) {
-            Writer<ParquetDocumentInput> writer = engine.createWriter(new WriterConfig(gen));
-            ParquetDocumentInput doc = engine.newDocumentInput();
+            Writer<ArrowDocumentInput> writer = engine.createWriter(new WriterConfig(gen));
+            ArrowDocumentInput doc = engine.newDocumentInput();
             populateMetadataFields(doc);
             doc.addField(idField, (int) gen);
             doc.addField(nameField, "user_" + gen);
@@ -133,7 +133,7 @@ public class ParquetIndexingEngineTests extends ParquetBaseTests {
     }
 
     public void testNewDocumentInput() {
-        ParquetDocumentInput doc = engine.newDocumentInput();
+        ArrowDocumentInput doc = engine.newDocumentInput();
         populateMetadataFields(doc);
         assertNotNull(doc);
         doc.setRowId("__row_id__", 0);
@@ -181,7 +181,7 @@ public class ParquetIndexingEngineTests extends ParquetBaseTests {
     }
 
     public void testFlushWithNoDocumentsReturnsEmpty() throws Exception {
-        Writer<ParquetDocumentInput> writer = engine.createWriter(new WriterConfig(1L));
+        Writer<ArrowDocumentInput> writer = engine.createWriter(new WriterConfig(1L));
         assertEquals(FileInfos.empty(), writer.flush(FlushInput.EMPTY));
     }
 
@@ -230,8 +230,8 @@ public class ParquetIndexingEngineTests extends ParquetBaseTests {
     private Schema buildSchema(List<MappedFieldType> fieldTypes) {
         List<Field> fields = new ArrayList<>();
         for (MappedFieldType ft : fieldTypes) {
-            ParquetField pf = ArrowFieldRegistry.getParquetField(ft.typeName());
-            assertNotNull("No ParquetField registered for type: " + ft.typeName(), pf);
+            ArrowField pf = ArrowFieldRegistry.getArrowField(ft.typeName());
+            assertNotNull("No ArrowField registered for type: " + ft.typeName(), pf);
             fields.add(new Field(ft.name(), pf.getFieldType(), null));
         }
         fields.addAll(metadataFields());

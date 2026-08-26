@@ -12,6 +12,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.common.SetOnce;
 import org.opensearch.index.engine.dataformat.RowIdMapping;
+import org.opensearch.dataformat.arrow.spi.NativeFormatWriter;
+import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.parquet.stats.ParquetShardStatsTracker;
 import org.opensearch.plugin.stats.StatsRecorder;
 
@@ -24,7 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>Wraps the stateless JNI methods in {@link RustBridge} with a file-scoped lifecycle:
  * <ol>
  *   <li>{@code new NativeParquetWriter(filePath)} — creates the handle (no native call)</li>
- *   <li>{@link #initialize(String, long, ParquetSortConfig, long)} — creates the native writer with the final schema</li>
+ *   <li>{@link #initialize(String, long, FormatSortConfig, long)} — creates the native writer with the final schema</li>
  *   <li>{@link #write(long, long)} — sends one or more Arrow batches (repeatable)</li>
  *   <li>{@link #flush()} — finalizes the Parquet file and returns metadata</li>
  * </ol>
@@ -32,20 +34,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>This class is not thread-safe. External synchronization is required
  * if instances are shared across threads.
  */
-public class NativeParquetWriter {
+public class NativeParquetWriter implements NativeFormatWriter {
 
     private static final Logger logger = LogManager.getLogger(NativeParquetWriter.class);
 
     private final AtomicBoolean writerFlushed = new AtomicBoolean(false);
     private final String filePath;
-    private final SetOnce<ParquetFileMetadata> metadata = new SetOnce<>();
+    private final SetOnce<FormatFileMetadata> metadata = new SetOnce<>();
     private final SetOnce<RowIdMapping> rowIdMapping = new SetOnce<>();
     private final ParquetShardStatsTracker stats;
     private volatile boolean initialized = false;
 
     /**
      * Creates a new NativeParquetWriter handle. Does not create the native writer —
-     * call {@link #initialize(String, long, ParquetSortConfig, long)} before the first write.
+     * call {@link #initialize(String, long, FormatSortConfig, long)} before the first write.
      *
      * @param filePath the path to the Parquet file to write
      * @param stats shard-level stats tracker
@@ -75,7 +77,7 @@ public class NativeParquetWriter {
      * @throws IOException if the native writer creation fails
      * @throws IllegalStateException if already initialized
      */
-    public void initialize(String indexName, long schemaAddress, ParquetSortConfig sortConfig, long writerGeneration) throws IOException {
+    public void initialize(String indexName, long schemaAddress, FormatSortConfig sortConfig, long writerGeneration) throws IOException {
         if (initialized) {
             throw new IllegalStateException("Writer already initialized: " + filePath);
         }
@@ -123,7 +125,7 @@ public class NativeParquetWriter {
      * @return the file metadata, or null if the writer was never initialized
      * @throws IOException if the finalization fails
      */
-    public ParquetFileMetadata flush() throws IOException {
+    public FormatFileMetadata flush() throws IOException {
         if (writerFlushed.compareAndSet(false, true)) {
             if (initialized) {
                 StatsRecorder.recordOutcome(() -> {
@@ -145,7 +147,7 @@ public class NativeParquetWriter {
      *
      * @return the file metadata, or null if the writer has not been flushed
      */
-    public ParquetFileMetadata getMetadata() {
+    public FormatFileMetadata getMetadata() {
         return metadata.get();
     }
 
@@ -165,6 +167,12 @@ public class NativeParquetWriter {
      * writer stranded by a failed operation does not survive as a stale entry and block recovery's
      * re-create for the same file.
      */
+    @Override
+    public String formatName() {
+        return ParquetDataFormatPlugin.PARQUET_DATA_FORMAT.name();
+    }
+
+    @Override
     public void cleanup() {
         if (initialized == false) {
             return; // no native entry was ever created

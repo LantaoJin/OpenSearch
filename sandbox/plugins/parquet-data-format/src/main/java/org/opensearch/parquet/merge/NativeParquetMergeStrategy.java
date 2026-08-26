@@ -21,7 +21,7 @@ import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.shard.ShardPath;
 import org.opensearch.index.store.FileMetadata;
 import org.opensearch.parquet.bridge.MergeFilesResult;
-import org.opensearch.parquet.bridge.ParquetFileMetadata;
+import org.opensearch.dataformat.arrow.spi.FormatFileMetadata;
 import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.engine.ParquetIndexingEngine;
 import org.opensearch.parquet.stats.ParquetShardStatsTracker;
@@ -87,7 +87,7 @@ public class NativeParquetMergeStrategy implements ParquetMergeStrategy {
         try {
             // Merge files in Rust
             MergeFilesResult merged = RustBridge.mergeParquetFilesInRust(filePaths, mergedFilePath.toString(), indexName, writerGeneration);
-            ParquetFileMetadata mergeMetadata = merged.metadata();
+            FormatFileMetadata mergeMetadata = merged.metadata();
             RowIdMapping rowIdMapping = merged.rowIdMapping();
 
             assert mergeMetadata.numRows() > 0 : "Merged file should contain at least one row";

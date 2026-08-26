@@ -23,7 +23,7 @@ import org.opensearch.index.mapper.TextSearchInfo;
 import org.opensearch.index.mapper.ValueFetcher;
 import org.opensearch.index.mapper.VersionFieldMapper;
 import org.opensearch.index.query.QueryShardContext;
-import org.opensearch.parquet.writer.ParquetDocumentInput;
+import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
 import org.opensearch.search.lookup.SearchLookup;
 import org.opensearch.test.OpenSearchTestCase;
 
@@ -92,7 +92,7 @@ public abstract class ParquetBaseTests extends OpenSearchTestCase {
         return fields;
     }
 
-    protected void populateMetadataFields(ParquetDocumentInput input) {
+    protected void populateMetadataFields(ArrowDocumentInput input) {
         input.addField(SEQ_NO_FIELD, 100L);
         input.addField(ID_FIELD, "id".getBytes(StandardCharsets.UTF_8));
         input.addField(VERSION_FIELD, 1L);

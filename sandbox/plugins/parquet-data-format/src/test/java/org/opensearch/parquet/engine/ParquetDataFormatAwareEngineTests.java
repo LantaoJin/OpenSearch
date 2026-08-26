@@ -46,10 +46,10 @@ import org.opensearch.index.store.Store;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.RustBridge;
-import org.opensearch.parquet.fields.ArrowFieldRegistry;
-import org.opensearch.parquet.fields.ParquetField;
-import org.opensearch.parquet.fields.plugins.CoreDataFieldPlugin;
-import org.opensearch.parquet.writer.ParquetDocumentInput;
+import org.opensearch.dataformat.arrow.fields.ArrowFieldRegistry;
+import org.opensearch.dataformat.arrow.fields.ArrowField;
+import org.opensearch.dataformat.arrow.fields.plugins.CoreDataFieldPlugin;
+import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
 import org.opensearch.plugins.SearchBackEndPlugin;
 import org.opensearch.test.IndexSettingsModule;
 import org.opensearch.threadpool.FixedExecutorBuilder;
@@ -197,7 +197,7 @@ public class ParquetDataFormatAwareEngineTests extends AbstractDataFormatAwareEn
     @Override
     protected DocumentInput<?> createDocumentInput() {
         ParquetDataFormat format = new ParquetDataFormat();
-        ParquetDocumentInput input = new ParquetDocumentInput();
+        ArrowDocumentInput input = new ArrowDocumentInput();
         input.addField(ID_FIELD, "doc-id".getBytes(StandardCharsets.UTF_8));
         input.addField(NAME_FIELD, "name");
         addFieldWithCapabilities(
@@ -269,7 +269,7 @@ public class ParquetDataFormatAwareEngineTests extends AbstractDataFormatAwareEn
         return input;
     }
 
-    private void addFieldWithCapabilities(ParquetDocumentInput input, MappedFieldType fieldType, Object value, ParquetDataFormat format) {
+    private void addFieldWithCapabilities(ArrowDocumentInput input, MappedFieldType fieldType, Object value, ParquetDataFormat format) {
         assignTestCapabilities(fieldType, format);
         input.addField(fieldType, value);
     }
@@ -301,10 +301,10 @@ public class ParquetDataFormatAwareEngineTests extends AbstractDataFormatAwareEn
     private Schema buildSchema() {
         List<Field> fields = new ArrayList<>();
         for (MappedFieldType ft : List.of(NAME_FIELD, AGE_FIELD)) {
-            ParquetField pf = ArrowFieldRegistry.getParquetField(ft.typeName());
+            ArrowField pf = ArrowFieldRegistry.getArrowField(ft.typeName());
             fields.add(new Field(ft.name(), pf.getFieldType(), null));
         }
-        for (Map.Entry<String, ParquetField> dataField : new CoreDataFieldPlugin().getParquetFields().entrySet()) {
+        for (Map.Entry<String, ArrowField> dataField : new CoreDataFieldPlugin().getArrowFields().entrySet()) {
             fields.add(new Field(dataField.getKey() + "_field", dataField.getValue().getFieldType(), null));
         }
         fields.addAll(metadataFields());

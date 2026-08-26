@@ -43,7 +43,7 @@ import org.opensearch.index.store.PrecomputedChecksumStrategy;
 import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.engine.ParquetDataFormat;
 import org.opensearch.parquet.engine.ParquetIndexingEngine;
-import org.opensearch.parquet.fields.ArrowSchemaBuilder;
+import org.opensearch.dataformat.arrow.fields.ArrowSchemaBuilder;
 import org.opensearch.parquet.stats.ParquetStatsProvider;
 import org.opensearch.parquet.stats.transport.ParquetNodeStatsActionType;
 import org.opensearch.parquet.stats.transport.ParquetNodeStatsRestAction;

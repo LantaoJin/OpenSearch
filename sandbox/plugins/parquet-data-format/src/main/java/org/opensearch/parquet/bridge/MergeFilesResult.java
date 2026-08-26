@@ -22,6 +22,6 @@ import org.opensearch.index.engine.dataformat.RowIdMapping;
  * @param flushAndSortChunkTimeMs cumulative wall-clock millis spent in flush+sort+chunk passes
  * @param rowIdMappingMax         highest row_id assigned during this merge (= rows written)
  */
-public record MergeFilesResult(RowIdMapping rowIdMapping, ParquetFileMetadata metadata, long flushAndSortChunkCount,
+public record MergeFilesResult(RowIdMapping rowIdMapping, FormatFileMetadata metadata, long flushAndSortChunkCount,
     long flushAndSortChunkTimeMs, long rowIdMappingMax) {
 }

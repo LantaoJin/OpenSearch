@@ -10,7 +10,7 @@ package org.opensearch.parquet.engine;
 
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
-import org.opensearch.parquet.fields.ArrowFieldRegistry;
+import org.opensearch.dataformat.arrow.fields.ArrowFieldRegistry;
 
 import java.util.Set;
 

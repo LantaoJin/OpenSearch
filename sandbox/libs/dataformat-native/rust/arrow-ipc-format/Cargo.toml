@@ -1,0 +1,18 @@
+[package]
+name = "opensearch-arrow-ipc-format"
+version = "0.1.0"
+edition = "2021"
+description = "Arrow IPC as a first-class OpenSearch data format, implemented against the format seam"
+license = "Apache-2.0"
+workspace = ".."
+
+[lib]
+name = "opensearch_arrow_ipc_format"
+crate-type = ["rlib"]
+
+[dependencies]
+arrow = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+opensearch-format-seam = { workspace = true }
+crc32fast = { workspace = true }

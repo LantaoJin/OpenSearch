@@ -28,12 +28,12 @@ import org.opensearch.index.store.PrecomputedChecksumStrategy;
 import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.NativeSettings;
 import org.opensearch.parquet.bridge.RustBridge;
-import org.opensearch.parquet.memory.ArrowBufferPool;
+import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
 import org.opensearch.parquet.merge.NativeParquetMergeStrategy;
 import org.opensearch.parquet.merge.ParquetMergeExecutor;
 import org.opensearch.parquet.stats.ParquetShardStatsTracker;
 import org.opensearch.parquet.stats.ParquetStatsProvider;
-import org.opensearch.parquet.writer.ParquetDocumentInput;
+import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
 import org.opensearch.parquet.writer.ParquetWriter;
 import org.opensearch.plugin.stats.DataFormatStatsProviderRegistry;
 import org.opensearch.threadpool.ThreadPool;
@@ -67,7 +67,7 @@ import static org.opensearch.parquet.ParquetDataFormatPlugin.PARQUET_DATA_FORMAT
  * time, where writer-specific settings (e.g., {@code parquet.max_rows_per_vsr}) are
  * extracted and applied.
  */
-public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDataFormat, ParquetDocumentInput> {
+public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDataFormat, ArrowDocumentInput> {
 
     private static final Logger logger = LogManager.getLogger(ParquetIndexingEngine.class);
 
@@ -250,7 +250,7 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
     }
 
     @Override
-    public Writer<ParquetDocumentInput> createWriter(WriterConfig config) {
+    public Writer<ArrowDocumentInput> createWriter(WriterConfig config) {
         long mappingVersion = mappingVersionSupplier.get();
         Schema schema = getOrBuildSchema();
         Path filePath = buildParquetFilePath(shardPath, config.writerGeneration(), null);
@@ -326,8 +326,8 @@ public class ParquetIndexingEngine implements IndexingExecutionEngine<ParquetDat
     }
 
     @Override
-    public ParquetDocumentInput newDocumentInput() {
-        return new ParquetDocumentInput();
+    public ArrowDocumentInput newDocumentInput() {
+        return new ArrowDocumentInput(PARQUET_DATA_FORMAT);
     }
 
     @Override

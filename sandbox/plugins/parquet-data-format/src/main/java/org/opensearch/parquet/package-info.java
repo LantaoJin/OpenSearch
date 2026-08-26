@@ -23,22 +23,22 @@
  *       and file generation per writer generation.</li>
  *   <li><strong>Writer layer</strong> ({@link org.opensearch.parquet.writer}) —
  *       Accepts documents as field-value pairs, delegates batching to the VSR layer.</li>
- *   <li><strong>VSR layer</strong> ({@link org.opensearch.parquet.vsr}) —
+ *   <li><strong>VSR layer</strong> ({@link org.opensearch.dataformat.arrow.vsr}) —
  *       Manages Arrow {@code VectorSchemaRoot} instances with ACTIVE/FROZEN/CLOSED lifecycle,
  *       row-count-based rotation, and memory-bounded batching.</li>
  *   <li><strong>Bridge layer</strong> ({@link org.opensearch.parquet.bridge}) —
  *       JNI bridge to the native Rust Parquet writer, handling Arrow C Data Interface
  *       pointer exchange and native resource lifecycle.</li>
- *   <li><strong>Fields layer</strong> ({@link org.opensearch.parquet.fields}) —
+ *   <li><strong>Fields layer</strong> ({@link org.opensearch.dataformat.arrow.fields}) —
  *       Extensible type mapping from OpenSearch field types to Arrow vector types,
  *       organized via a plugin registry pattern.</li>
- *   <li><strong>Memory layer</strong> ({@link org.opensearch.parquet.memory}) —
+ *   <li><strong>Memory layer</strong> ({@link org.opensearch.dataformat.arrow.memory}) —
  *       Arrow buffer allocation with configurable limits derived from node settings.</li>
  * </ol>
  *
  * <h2>Data Flow</h2>
  * <pre>
- * Document → ParquetDocumentInput (field collection)
+ * Document → ArrowDocumentInput (field collection)
  *          → VSRManager.addDocument (field transfer to Arrow vectors)
  *          → VSRPool rotation (when row threshold reached)
  *          → NativeParquetWriter.write (Arrow C Data export to Rust)

@@ -298,7 +298,7 @@ public class RustBridge {
 
     public static void initLogger() {}
 
-    static void createWriter(String file, String indexName, long schemaAddress, ParquetSortConfig sortConfig, long writerGeneration)
+    static void createWriter(String file, String indexName, long schemaAddress, FormatSortConfig sortConfig, long writerGeneration)
         throws IOException {
         try (var call = new NativeCall()) {
             var f = call.str(file);
@@ -347,7 +347,7 @@ public class RustBridge {
     /**
      * Result of finalizing a writer: metadata + optional row ID mapping.
      */
-    record WriterFinalizeResult(ParquetFileMetadata metadata, RowIdMapping rowIdMapping) {
+    record WriterFinalizeResult(FormatFileMetadata metadata, RowIdMapping rowIdMapping) {
     }
 
     static WriterFinalizeResult finalizeWriter(String file) throws IOException {
@@ -376,7 +376,7 @@ public class RustBridge {
             );
             if (rc == 1) return null;
             int createdByLen = out.actualLength();
-            ParquetFileMetadata metadata = new ParquetFileMetadata(
+            FormatFileMetadata metadata = new FormatFileMetadata(
                 versionOut.get(ValueLayout.JAVA_INT, 0),
                 numRowsOut.get(ValueLayout.JAVA_LONG, 0),
                 createdByLen >= 0
@@ -405,7 +405,7 @@ public class RustBridge {
         }
     }
 
-    public static ParquetFileMetadata getFileMetadata(String file) throws IOException {
+    public static FormatFileMetadata getFileMetadata(String file) throws IOException {
         try (var call = new NativeCall()) {
             var f = call.str(file);
             var versionOut = call.intOut();
@@ -424,7 +424,7 @@ public class RustBridge {
                 numRowGroupsOut
             );
             int createdByLen = out.actualLength();
-            return new ParquetFileMetadata(
+            return new FormatFileMetadata(
                 versionOut.get(ValueLayout.JAVA_INT, 0),
                 numRowsOut.get(ValueLayout.JAVA_LONG, 0),
                 createdByLen >= 0
@@ -629,7 +629,7 @@ public class RustBridge {
             );
 
             int createdByLen = (int) createdByOut.lenOut().get(ValueLayout.JAVA_LONG, 0);
-            ParquetFileMetadata metadata = new ParquetFileMetadata(
+            FormatFileMetadata metadata = new FormatFileMetadata(
                 versionOut.get(ValueLayout.JAVA_INT, 0),
                 numRowsOut.get(ValueLayout.JAVA_LONG, 0),
                 createdByLen >= 0

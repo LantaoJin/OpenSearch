@@ -24,6 +24,8 @@ dependencies {
 
   // Shared native bridge lib (provides the unified .so and FFM SymbolLookup)
   implementation project(':sandbox:libs:dataformat-native')
+  // The format-agnostic mapping-to-Arrow document pipeline, shared with every other columnar format.
+  implementation project(':sandbox:libs:arrow-document')
 
   // Apache Arrow dependencies
   implementation "org.apache.arrow:arrow-vector:${versions.arrow}"

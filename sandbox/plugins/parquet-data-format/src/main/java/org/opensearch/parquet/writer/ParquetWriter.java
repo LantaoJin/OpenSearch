@@ -22,12 +22,14 @@ import org.opensearch.index.engine.exec.MonoFileWriterSet;
 import org.opensearch.index.store.FileMetadata;
 import org.opensearch.index.store.FormatChecksumStrategy;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
+import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.parquet.ParquetSettings;
-import org.opensearch.parquet.bridge.ParquetFileMetadata;
+import org.opensearch.parquet.bridge.NativeParquetWriter;
+import org.opensearch.dataformat.arrow.spi.FormatFileMetadata;
 import org.opensearch.parquet.engine.ParquetDataFormat;
-import org.opensearch.parquet.memory.ArrowBufferPool;
+import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
 import org.opensearch.parquet.stats.ParquetShardStatsTracker;
-import org.opensearch.parquet.vsr.VSRManager;
+import org.opensearch.dataformat.arrow.vsr.VSRManager;
 import org.opensearch.plugin.stats.StatsRecorder;
 import org.opensearch.threadpool.ThreadPool;
 
@@ -39,7 +41,7 @@ import java.util.function.Supplier;
  * Parquet file writer integrating OpenSearch's {@link Writer} interface with the VSR batching layer.
  *
  * <p>Each instance corresponds to a single Parquet file for a given writer generation.
- * Documents are accepted via {@link #addDoc(ParquetDocumentInput)}, batched in Arrow vectors
+ * Documents are accepted via {@link #addDoc(ArrowDocumentInput)}, batched in Arrow vectors
  * by the {@link VSRManager}, and flushed to a Parquet file via the native Rust writer.
  *
  * <p>Writer-level settings (e.g., {@code parquet.max_rows_per_vsr}) are extracted from
@@ -48,7 +50,7 @@ import java.util.function.Supplier;
  * <p>The returned {@link FileInfos} from {@link #flush(FlushInput)} contains the file path, writer
  * generation, and row count for downstream commit tracking.
  */
-public class ParquetWriter implements Writer<ParquetDocumentInput> {
+public class ParquetWriter implements Writer<ArrowDocumentInput> {
 
     private static final Logger logger = LogManager.getLogger(ParquetWriter.class);
 
@@ -107,8 +109,11 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
             bufferPool,
             ParquetSettings.MAX_ROWS_PER_VSR.get(indexSettings.getSettings()),
             threadPool,
+            true,
             writerGeneration,
-            stats
+            stats,
+            new NativeParquetWriter(file, stats),
+            ParquetDataFormatPlugin.PARQUET_THREAD_POOL_NAME
         );
     }
 
@@ -143,7 +148,7 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
     }
 
     @Override
-    public WriteResult addDoc(ParquetDocumentInput d) throws IOException {
+    public WriteResult addDoc(ArrowDocumentInput d) throws IOException {
         if (state != WriterState.ACTIVE) {
             throw new IllegalStateException("Writer is not active, state=" + state);
         }
@@ -187,7 +192,7 @@ public class ParquetWriter implements Writer<ParquetDocumentInput> {
 
     @Override
     public FileInfos flush(FlushInput flushInput) throws IOException {
-        ParquetFileMetadata metadata = vsrManager.flush();
+        FormatFileMetadata metadata = vsrManager.flush();
         if (file == null || metadata == null || metadata.numRows() == 0) {
             return FileInfos.empty();
         }

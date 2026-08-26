@@ -99,7 +99,7 @@ public class NativeParquetWriterTests extends OpenSearchTestCase {
     public void testFlushWithoutWrite() throws Exception {
         String filePath = createTempDir().resolve("close-only.parquet").toString();
         NativeParquetWriter writer = new NativeParquetWriter(filePath);
-        ParquetFileMetadata metadata = writer.flush();
+        FormatFileMetadata metadata = writer.flush();
         // Writer was never initialized, so flush returns null
         assertNull(metadata);
     }
@@ -114,7 +114,7 @@ public class NativeParquetWriterTests extends OpenSearchTestCase {
         }
 
         writer.flush();
-        ParquetFileMetadata first = writer.getMetadata();
+        FormatFileMetadata first = writer.getMetadata();
         writer.flush();
         assertSame(first, writer.getMetadata());
     }
@@ -140,7 +140,7 @@ public class NativeParquetWriterTests extends OpenSearchTestCase {
         try (ArrowExport export = exportSchema()) {
             expectThrows(
                 IOException.class,
-                () -> writer.initialize("test-index", export.getSchemaAddress(), ParquetSortConfig.empty(), 0L)
+                () -> writer.initialize("test-index", export.getSchemaAddress(), FormatSortConfig.empty(), 0L)
             );
         }
     }
@@ -149,7 +149,7 @@ public class NativeParquetWriterTests extends OpenSearchTestCase {
         String filePath = createTempDir().resolve("bad-schema.parquet").toString();
         NativeParquetWriter writer = new NativeParquetWriter(filePath);
         assertFalse(writer.isInitialized());
-        expectThrows(Exception.class, () -> writer.initialize("test-index", 0L, ParquetSortConfig.empty(), 0L));
+        expectThrows(Exception.class, () -> writer.initialize("test-index", 0L, FormatSortConfig.empty(), 0L));
     }
 
     public void testWriteWithSchemaMismatch() throws Exception {
@@ -199,7 +199,7 @@ public class NativeParquetWriterTests extends OpenSearchTestCase {
         // the previous writer un-finalized).
         NativeParquetWriter writer2 = new NativeParquetWriter(filePath);
         try (ArrowExport export = exportSchema()) {
-            writer2.initialize("test-index", export.getSchemaAddress(), ParquetSortConfig.empty(), 0L);
+            writer2.initialize("test-index", export.getSchemaAddress(), FormatSortConfig.empty(), 0L);
         }
         assertTrue("second writer must initialize after replacing the stale entry", writer2.isInitialized());
 
@@ -219,7 +219,7 @@ public class NativeParquetWriterTests extends OpenSearchTestCase {
         // A fresh writer can now initialize for the same file.
         NativeParquetWriter writer2 = new NativeParquetWriter(filePath);
         try (ArrowExport export = exportSchema()) {
-            writer2.initialize("test-index", export.getSchemaAddress(), ParquetSortConfig.empty(), 0L);
+            writer2.initialize("test-index", export.getSchemaAddress(), FormatSortConfig.empty(), 0L);
         }
         assertTrue("writer must re-initialize for the same file after cleanup", writer2.isInitialized());
 
@@ -269,7 +269,7 @@ public class NativeParquetWriterTests extends OpenSearchTestCase {
     private NativeParquetWriter createWriter(String filePath) throws Exception {
         NativeParquetWriter writer = new NativeParquetWriter(filePath);
         try (ArrowExport export = exportSchema()) {
-            writer.initialize("test-index", export.getSchemaAddress(), ParquetSortConfig.empty(), 0L);
+            writer.initialize("test-index", export.getSchemaAddress(), FormatSortConfig.empty(), 0L);
         }
         return writer;
     }

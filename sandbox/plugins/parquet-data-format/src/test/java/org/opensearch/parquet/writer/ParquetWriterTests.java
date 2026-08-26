@@ -28,9 +28,9 @@ import org.opensearch.parquet.ParquetBaseTests;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.engine.ParquetDataFormat;
-import org.opensearch.parquet.fields.ArrowFieldRegistry;
-import org.opensearch.parquet.fields.ParquetField;
-import org.opensearch.parquet.memory.ArrowBufferPool;
+import org.opensearch.dataformat.arrow.fields.ArrowFieldRegistry;
+import org.opensearch.dataformat.arrow.fields.ArrowField;
+import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
 import org.opensearch.threadpool.FixedExecutorBuilder;
 import org.opensearch.threadpool.ThreadPool;
 
@@ -111,7 +111,7 @@ public class ParquetWriterTests extends ParquetBaseTests {
             null
         );
 
-        ParquetDocumentInput doc = new ParquetDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput();
         populateMetadataFields(doc);
         doc.addField(idField, 1);
         doc.addField(nameField, "alice");
@@ -138,7 +138,7 @@ public class ParquetWriterTests extends ParquetBaseTests {
             null
         );
 
-        ParquetDocumentInput doc = new ParquetDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput();
         populateMetadataFields(doc);
         doc.addField(idField, 42);
         doc.addField(nameField, "bob");
@@ -167,7 +167,7 @@ public class ParquetWriterTests extends ParquetBaseTests {
         );
 
         for (int i = 0; i < 10; i++) {
-            ParquetDocumentInput doc = new ParquetDocumentInput();
+            ArrowDocumentInput doc = new ArrowDocumentInput();
             populateMetadataFields(doc);
             doc.addField(idField, i);
             doc.addField(nameField, "user_" + i);
@@ -219,7 +219,7 @@ public class ParquetWriterTests extends ParquetBaseTests {
         // VectorSchemaRoot inside VSRManager.addDocument throws an Arrow OutOfMemoryException.
         nativeAllocator.setPoolLimit(NativeAllocatorPoolConfig.POOL_INGEST, 1L);
 
-        ParquetDocumentInput doc = new ParquetDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput();
         populateMetadataFields(doc);
         doc.addField(idField, 1);
         doc.addField(nameField, "alice");
@@ -244,8 +244,8 @@ public class ParquetWriterTests extends ParquetBaseTests {
     private Schema buildSchema(List<MappedFieldType> fieldTypes) {
         List<Field> fields = new ArrayList<>();
         for (MappedFieldType ft : fieldTypes) {
-            ParquetField pf = ArrowFieldRegistry.getParquetField(ft.typeName());
-            assertNotNull("No ParquetField registered for type: " + ft.typeName(), pf);
+            ArrowField pf = ArrowFieldRegistry.getArrowField(ft.typeName());
+            assertNotNull("No ArrowField registered for type: " + ft.typeName(), pf);
             fields.add(new Field(ft.name(), pf.getFieldType(), null));
         }
         fields.addAll(metadataFields());

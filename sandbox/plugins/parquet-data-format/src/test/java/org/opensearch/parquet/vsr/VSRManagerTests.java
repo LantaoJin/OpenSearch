@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.parquet.vsr;
+package org.opensearch.dataformat.arrow.vsr;
 
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.types.pojo.ArrowType;
@@ -25,11 +25,11 @@ import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.parquet.ParquetBaseTests;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
-import org.opensearch.parquet.bridge.ParquetFileMetadata;
+import org.opensearch.dataformat.arrow.spi.FormatFileMetadata;
 import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.engine.ParquetDataFormat;
-import org.opensearch.parquet.memory.ArrowBufferPool;
-import org.opensearch.parquet.writer.ParquetDocumentInput;
+import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
+import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
 import org.opensearch.threadpool.FixedExecutorBuilder;
 import org.opensearch.threadpool.ThreadPool;
 
@@ -98,7 +98,7 @@ public class VSRManagerTests extends ParquetBaseTests {
     public void testFlushWithNoDataReturnsMetadata() throws Exception {
         String filePath = createTempDir().resolve("empty.parquet").toString();
         VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L);
-        ParquetFileMetadata metadata = manager.flush();
+        FormatFileMetadata metadata = manager.flush();
         // With lazy native writer init, flush returns null when no data was written
         assertNull(metadata);
     }
@@ -113,7 +113,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         vec.setSafe(1, 20);
         active.setRowCount(2);
 
-        ParquetFileMetadata metadata = manager.flush();
+        FormatFileMetadata metadata = manager.flush();
         assertNotNull(metadata);
         assertEquals(2, metadata.numRows());
         assertNull(manager.getActiveManagedVSR());
@@ -130,7 +130,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
         NumberFieldMapper.NumberFieldType valField = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.INTEGER);
         assignTestCapabilities(valField, PARQUET_FORMAT);
-        ParquetDocumentInput doc = new ParquetDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput();
         populateMetadataFields(doc);
         doc.addField(valField, 42);
         doc.setRowId("__row_id__", 0);
@@ -138,7 +138,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
         assertEquals(1, manager.getActiveManagedVSR().getRowCount());
 
-        ParquetFileMetadata metadata = manager.flush();
+        FormatFileMetadata metadata = manager.flush();
         assertNotNull(metadata);
         assertEquals(1, metadata.numRows());
     }
@@ -214,7 +214,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         VSRManager manager2 = new VSRManager(filePath, indexSettings, schema, bufferPool, 1, threadPool, 0L);
         try {
             ingest(manager2);
-            ParquetFileMetadata metadata = manager2.flush();
+            FormatFileMetadata metadata = manager2.flush();
             assertNotNull(metadata);
             assertEquals(2, metadata.numRows());
         } finally {
@@ -228,7 +228,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         NumberFieldMapper.NumberFieldType valField = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.INTEGER);
         assignTestCapabilities(valField, PARQUET_FORMAT);
         for (int i = 0; i < 2; i++) {
-            ParquetDocumentInput doc = new ParquetDocumentInput();
+            ArrowDocumentInput doc = new ArrowDocumentInput();
             populateMetadataFields(doc);
             doc.addField(valField, i);
             doc.setRowId(DocumentInput.ROW_ID_FIELD, i);
@@ -269,7 +269,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         vec2.setSafe(0, 99);
         second.setRowCount(1);
 
-        ParquetFileMetadata metadata = manager.flush();
+        FormatFileMetadata metadata = manager.flush();
         assertNotNull(metadata);
         assertEquals(50001, metadata.numRows());
     }
@@ -333,7 +333,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         vec2.setSafe(0, 42);
         second.setRowCount(1);
 
-        ParquetFileMetadata metadata = manager.flush();
+        FormatFileMetadata metadata = manager.flush();
         assertNotNull(metadata);
         assertEquals(101, metadata.numRows());
     }
@@ -357,7 +357,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         vec2.setSafe(0, 999);
         second.setRowCount(1);
 
-        ParquetFileMetadata metadata = manager.flush();
+        FormatFileMetadata metadata = manager.flush();
         assertNotNull(metadata);
         // Both the rotated batch (100 rows) and the flushed batch (1 row) should be in the file
         assertEquals(101, metadata.numRows());
@@ -393,14 +393,14 @@ public class VSRManagerTests extends ParquetBaseTests {
         KeywordFieldMapper.KeywordFieldType tagField = new KeywordFieldMapper.KeywordFieldType("tag");
         assignTestCapabilities(valField, PARQUET_FORMAT);
         assignTestCapabilities(tagField, PARQUET_FORMAT);
-        ParquetDocumentInput doc = new ParquetDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput();
         populateMetadataFields(doc);
         doc.setRowId(DocumentInput.ROW_ID_FIELD, 0);
         doc.addField(valField, 42);
         doc.addField(tagField, "hello");
         manager.addDocument(doc);
 
-        ParquetFileMetadata metadata = manager.flush();
+        FormatFileMetadata metadata = manager.flush();
         assertNotNull(metadata);
         assertEquals(1, metadata.numRows());
     }
@@ -414,7 +414,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
         NumberFieldMapper.NumberFieldType valField = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.INTEGER);
         assignTestCapabilities(valField, PARQUET_FORMAT);
-        ParquetDocumentInput doc = new ParquetDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput();
         populateMetadataFields(doc);
         doc.setRowId(DocumentInput.ROW_ID_FIELD, 0);
         doc.addField(valField, 1);
@@ -437,7 +437,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         // rotation triggered by maxRowsPerVSR=1.
         manager.reconcileSchema(schemaWith("tag", new ArrowType.Utf8()));
         {
-            ParquetDocumentInput doc1 = new ParquetDocumentInput();
+            ArrowDocumentInput doc1 = new ArrowDocumentInput();
             populateMetadataFields(doc1);
             doc1.setRowId(DocumentInput.ROW_ID_FIELD, 0L);
             doc1.addField(valField, 1);
@@ -446,7 +446,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         }
 
         {
-            ParquetDocumentInput doc2 = new ParquetDocumentInput();
+            ArrowDocumentInput doc2 = new ArrowDocumentInput();
             populateMetadataFields(doc2);
             doc2.setRowId(DocumentInput.ROW_ID_FIELD, 1L);
             doc2.addField(valField, 2);
@@ -455,7 +455,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         }
 
         {
-            ParquetDocumentInput doc3 = new ParquetDocumentInput();
+            ArrowDocumentInput doc3 = new ArrowDocumentInput();
             populateMetadataFields(doc3);
             doc3.setRowId(DocumentInput.ROW_ID_FIELD, 2L);
             doc3.addField(valField, 3);
@@ -463,7 +463,7 @@ public class VSRManagerTests extends ParquetBaseTests {
             manager.addDocument(doc3); // this would've triggerer the rotation
         }
 
-        ParquetFileMetadata metadata = manager.flush();
+        FormatFileMetadata metadata = manager.flush();
         assertEquals(3, metadata.numRows());
     }
 
@@ -489,7 +489,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         assignTestCapabilities(tag2Field, PARQUET_FORMAT);
         assignTestCapabilities(tag3Field, PARQUET_FORMAT);
 
-        ParquetDocumentInput doc = new ParquetDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput();
         populateMetadataFields(doc);
         doc.setRowId(DocumentInput.ROW_ID_FIELD, 0L);
         doc.addField(valField, 1);
@@ -498,7 +498,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         doc.addField(tag3Field, "c");
         manager.addDocument(doc);
 
-        ParquetFileMetadata metadata = manager.flush();
+        FormatFileMetadata metadata = manager.flush();
         assertNotNull(metadata);
         assertEquals(1, metadata.numRows());
     }
@@ -514,13 +514,13 @@ public class VSRManagerTests extends ParquetBaseTests {
         try {
             assertEquals(0L, manager.getAcceptedRows());
 
-            ParquetDocumentInput doc1 = new ParquetDocumentInput();
+            ArrowDocumentInput doc1 = new ArrowDocumentInput();
             populateMetadataFields(doc1);
             doc1.setRowId(DocumentInput.ROW_ID_FIELD, 0L);
             manager.addDocument(doc1);
             assertEquals(1L, manager.getAcceptedRows());
 
-            ParquetDocumentInput doc2 = new ParquetDocumentInput();
+            ArrowDocumentInput doc2 = new ArrowDocumentInput();
             populateMetadataFields(doc2);
             doc2.setRowId(DocumentInput.ROW_ID_FIELD, 1L);
             manager.addDocument(doc2);
@@ -530,7 +530,7 @@ public class VSRManagerTests extends ParquetBaseTests {
             assertEquals(1L, manager.getAcceptedRows());
 
             // Next doc reuses rowId 1 (the slot freed by rollback).
-            ParquetDocumentInput doc3 = new ParquetDocumentInput();
+            ArrowDocumentInput doc3 = new ArrowDocumentInput();
             populateMetadataFields(doc3);
             doc3.setRowId(DocumentInput.ROW_ID_FIELD, 1L);
             manager.addDocument(doc3);
@@ -555,7 +555,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         VSRManager manager = new VSRManager(filePath, indexSettings, schemaWithRowId, bufferPool, 50000, threadPool, 0L);
         try {
             for (int i = 0; i < 50; i++) {
-                ParquetDocumentInput doc = new ParquetDocumentInput();
+                ArrowDocumentInput doc = new ArrowDocumentInput();
                 populateMetadataFields(doc);
                 doc.setRowId(DocumentInput.ROW_ID_FIELD, (long) i);
                 manager.addDocument(doc);
@@ -610,7 +610,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         int rowId = 0;
         for (int cycle = 0; cycle < cycles; cycle++) {
             for (int i = 0; i < lowThreshold; i++) {
-                ParquetDocumentInput doc = new ParquetDocumentInput();
+                ArrowDocumentInput doc = new ArrowDocumentInput();
                 populateMetadataFields(doc);
                 doc.addField(valField, rowId);
                 doc.setRowId(DocumentInput.ROW_ID_FIELD, rowId);
@@ -626,7 +626,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
             // This addDocument must NOT throw — verifies the fix for the
             // exceptionNow() bug on successfully completed futures
-            ParquetDocumentInput nextDoc = new ParquetDocumentInput();
+            ArrowDocumentInput nextDoc = new ArrowDocumentInput();
             populateMetadataFields(nextDoc);
             nextDoc.addField(valField, rowId);
             nextDoc.setRowId(DocumentInput.ROW_ID_FIELD, rowId);
@@ -654,7 +654,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
         // Add all docs in a tight loop — no waiting between rotations
         for (int i = 0; i < totalDocs; i++) {
-            ParquetDocumentInput doc = new ParquetDocumentInput();
+            ArrowDocumentInput doc = new ArrowDocumentInput();
             populateMetadataFields(doc);
             doc.addField(valField, i);
             doc.setRowId(DocumentInput.ROW_ID_FIELD, i);
@@ -662,7 +662,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         }
 
         // Flush at the end — must succeed regardless of pending write state
-        ParquetFileMetadata metadata = manager.flush();
+        FormatFileMetadata metadata = manager.flush();
         assertNotNull(metadata);
         assertEquals(totalDocs, metadata.numRows());
     }
@@ -682,7 +682,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         assignTestCapabilities(priceField, PARQUET_FORMAT);
         assignTestCapabilities(qtyField, PARQUET_FORMAT);
 
-        ParquetDocumentInput doc = new ParquetDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput();
         populateMetadataFields(doc);
         doc.addField(priceField, 10);
         doc.addField(qtyField, 5);

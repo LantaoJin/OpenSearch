@@ -8,6 +8,8 @@
 
 package org.opensearch.parquet.stats;
 
+import org.opensearch.dataformat.arrow.spi.ArrowIngestStats;
+
 import org.opensearch.common.annotation.ExperimentalApi;
 
 import java.util.concurrent.atomic.LongAccumulator;
@@ -21,7 +23,7 @@ import java.util.concurrent.atomic.LongAdder;
  * @opensearch.experimental
  */
 @ExperimentalApi
-public class ParquetShardStatsTracker {
+public class ParquetShardStatsTracker implements ArrowIngestStats {
 
     // Indexing counters
     private final LongAdder docsIndexedTotal = new LongAdder();

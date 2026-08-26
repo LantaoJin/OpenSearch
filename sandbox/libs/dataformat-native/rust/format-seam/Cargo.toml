@@ -1,0 +1,16 @@
+[package]
+name = "opensearch-format-seam"
+version = "0.1.0"
+edition = "2021"
+description = "Format-agnostic writer/reader seam for OpenSearch columnar data formats"
+license = "Apache-2.0"
+workspace = ".."
+
+[lib]
+name = "opensearch_format_seam"
+crate-type = ["rlib"]
+
+[dependencies]
+arrow = { workspace = true }
+arrow-schema = { workspace = true }
+native-bridge-common = { workspace = true }

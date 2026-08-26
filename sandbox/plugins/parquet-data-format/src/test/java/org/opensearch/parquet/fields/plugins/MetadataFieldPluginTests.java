@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.parquet.fields.plugins;
+package org.opensearch.dataformat.arrow.fields.plugins;
 
 import org.opensearch.index.mapper.DocCountFieldMapper;
 import org.opensearch.index.mapper.IdFieldMapper;
@@ -16,19 +16,19 @@ import org.opensearch.index.mapper.RoutingFieldMapper;
 import org.opensearch.index.mapper.SeqNoFieldMapper;
 import org.opensearch.index.mapper.SourceFieldMapper;
 import org.opensearch.index.mapper.VersionFieldMapper;
-import org.opensearch.parquet.fields.ParquetField;
+import org.opensearch.dataformat.arrow.fields.ArrowField;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.Map;
 
 public class MetadataFieldPluginTests extends OpenSearchTestCase {
 
-    private Map<String, ParquetField> fields;
+    private Map<String, ArrowField> fields;
 
     @Override
     public void setUp() throws Exception {
         super.setUp();
-        fields = new MetadataFieldPlugin().getParquetFields();
+        fields = new MetadataFieldPlugin().getArrowFields();
     }
 
     public void testFieldCount() {
@@ -49,8 +49,8 @@ public class MetadataFieldPluginTests extends OpenSearchTestCase {
     }
 
     public void testAllValuesNonNull() {
-        for (Map.Entry<String, ParquetField> entry : fields.entrySet()) {
-            assertNotNull("Null ParquetField for: " + entry.getKey(), entry.getValue());
+        for (Map.Entry<String, ArrowField> entry : fields.entrySet()) {
+            assertNotNull("Null ArrowField for: " + entry.getKey(), entry.getValue());
         }
     }
 }

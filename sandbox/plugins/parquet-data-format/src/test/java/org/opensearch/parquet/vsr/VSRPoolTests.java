@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.parquet.vsr;
+package org.opensearch.dataformat.arrow.vsr;
 
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
@@ -15,7 +15,7 @@ import org.apache.arrow.vector.types.pojo.Schema;
 import org.opensearch.arrow.allocator.ArrowNativeAllocator;
 import org.opensearch.arrow.spi.NativeAllocatorPoolConfig;
 import org.opensearch.common.settings.Settings;
-import org.opensearch.parquet.memory.ArrowBufferPool;
+import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.io.IOException;

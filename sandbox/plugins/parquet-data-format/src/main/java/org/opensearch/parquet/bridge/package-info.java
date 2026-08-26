@@ -23,7 +23,7 @@
  *       the native writer with lifecycle management (create → write → close → flush).</li>
  *   <li>{@link org.opensearch.nativebridge.spi.ArrowExport} — RAII container for exported
  *       Arrow C Data Interface pointers ({@code ArrowArray} + {@code ArrowSchema}).</li>
- *   <li>{@link org.opensearch.parquet.bridge.ParquetFileMetadata} — Immutable record of
+ *   <li>{@link org.opensearch.parquet.bridge.FormatFileMetadata} — Immutable record of
  *       metadata returned by the native writer after file finalization.</li>
  * </ul>
  *

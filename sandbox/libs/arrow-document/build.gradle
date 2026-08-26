@@ -1,0 +1,49 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ */
+
+/*
+ * Format-agnostic OpenSearch-mapping -> Apache Arrow document pipeline.
+ *
+ * This library holds everything a columnar data format needs in order to turn indexing
+ * requests into Arrow batches, and nothing about any particular file format:
+ *
+ *   fields/   MappedFieldType -> Arrow vector writers, plus Arrow schema construction
+ *   vsr/      VectorSchemaRoot lifecycle: pooling, rotation, batch accumulation
+ *   memory/   Arrow buffer pooling
+ *   document/ the DocumentInput implementation that feeds the above
+ *   spi/      the seam a concrete format implements (NativeFormatWriter and friends)
+ *
+ * A concrete format plugin (parquet-data-format, arrow-ipc-data-format, ...) depends on this
+ * library and supplies only its DataFormat, IndexingExecutionEngine, Writer, merge strategy
+ * and its native binding. See sandbox/LOON-INTEGRATION-DESIGN.md.
+ */
+
+java { sourceCompatibility = JavaVersion.toVersion(21); targetCompatibility = JavaVersion.toVersion(21) }
+
+testingConventions.enabled = false
+
+dependencies {
+  compileOnly project(':server')
+  compileOnly project(':plugins:arrow-base')
+  compileOnly project(':sandbox:libs:plugin-stats-spi')
+  api project(':sandbox:libs:dataformat-native')
+
+  // Arrow — this library's whole purpose is producing Arrow batches, so these are api-scoped.
+  api "org.apache.arrow:arrow-vector:${versions.arrow}"
+  api "org.apache.arrow:arrow-memory-core:${versions.arrow}"
+  api "org.apache.arrow:arrow-format:${versions.arrow}"
+  api "org.apache.arrow:arrow-c-data:${versions.arrow}"
+  implementation "org.apache.arrow:arrow-memory-netty:${versions.arrow}"
+  implementation "org.apache.arrow:arrow-memory-netty-buffer-patch:${versions.arrow}"
+  implementation "io.netty:netty-buffer:${versions.netty}"
+  implementation "io.netty:netty-common:${versions.netty}"
+  implementation "com.google.flatbuffers:flatbuffers-java:${versions.flatbuffers}"
+
+  compileOnly 'org.checkerframework:checker-qual:3.43.0'
+  implementation "org.apache.logging.log4j:log4j-api:${versions.log4j}"
+}

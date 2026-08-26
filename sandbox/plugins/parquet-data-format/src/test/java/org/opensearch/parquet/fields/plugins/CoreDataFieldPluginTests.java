@@ -6,7 +6,7 @@
  * compatible open source license.
  */
 
-package org.opensearch.parquet.fields.plugins;
+package org.opensearch.dataformat.arrow.fields.plugins;
 
 import org.opensearch.index.mapper.BinaryFieldMapper;
 import org.opensearch.index.mapper.BooleanFieldMapper;
@@ -15,19 +15,19 @@ import org.opensearch.index.mapper.IpFieldMapper;
 import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.index.mapper.TextFieldMapper;
-import org.opensearch.parquet.fields.ParquetField;
+import org.opensearch.dataformat.arrow.fields.ArrowField;
 import org.opensearch.test.OpenSearchTestCase;
 
 import java.util.Map;
 
 public class CoreDataFieldPluginTests extends OpenSearchTestCase {
 
-    private Map<String, ParquetField> fields;
+    private Map<String, ArrowField> fields;
 
     @Override
     public void setUp() throws Exception {
         super.setUp();
-        fields = new CoreDataFieldPlugin().getParquetFields();
+        fields = new CoreDataFieldPlugin().getArrowFields();
     }
 
     public void testFieldCount() {
@@ -60,8 +60,8 @@ public class CoreDataFieldPluginTests extends OpenSearchTestCase {
     }
 
     public void testAllValuesNonNull() {
-        for (Map.Entry<String, ParquetField> entry : fields.entrySet()) {
-            assertNotNull("Null ParquetField for: " + entry.getKey(), entry.getValue());
+        for (Map.Entry<String, ArrowField> entry : fields.entrySet()) {
+            assertNotNull("Null ArrowField for: " + entry.getKey(), entry.getValue());
         }
     }
 }

@@ -12,7 +12,7 @@ import org.apache.arrow.vector.types.pojo.Schema;
 import org.opensearch.index.IndexCreationValidator;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.mapper.MapperService;
-import org.opensearch.parquet.fields.ArrowSchemaBuilder;
+import org.opensearch.dataformat.arrow.fields.ArrowSchemaBuilder;
 
 import java.util.Map;
 import java.util.Set;
