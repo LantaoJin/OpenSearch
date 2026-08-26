@@ -84,7 +84,11 @@ public class VSRManager implements AutoCloseable {
     private long acceptedRows = 0L;
 
     /**
-     * Creates a new VSRManager with asynchronous background writes (production default).
+     * Convenience constructor for tests and benchmarks: synchronous rotation writes, no stats.
+     *
+     * <p>There is deliberately no overload that omits {@code writer}. A VSRManager without a
+     * {@link NativeFormatWriter} has nothing to write to, and defaulting it to one format would
+     * reintroduce exactly the coupling this library was extracted to remove.
      */
     public VSRManager(
         String fileName,
@@ -94,22 +98,7 @@ public class VSRManager implements AutoCloseable {
         int maxRowsPerVSR,
         ThreadPool threadPool,
         long writerGeneration,
-        ArrowIngestStats stats
-    ) {
-        this(fileName, indexSettings, schema, bufferPool, maxRowsPerVSR, threadPool, true, writerGeneration, stats);
-    }
-
-    /**
-     * Creates a new VSRManager with asynchronous background writes and no stats collection.
-     */
-    public VSRManager(
-        String fileName,
-        IndexSettings indexSettings,
-        Schema schema,
-        ArrowBufferPool bufferPool,
-        int maxRowsPerVSR,
-        ThreadPool threadPool,
-        long writerGeneration
+        NativeFormatWriter writer
     ) {
         this(
             fileName,
@@ -118,35 +107,11 @@ public class VSRManager implements AutoCloseable {
             bufferPool,
             maxRowsPerVSR,
             threadPool,
-            true,
+            false,
             writerGeneration,
-            ArrowIngestStats.NOOP
-        );
-    }
-
-    /**
-     * Creates a new VSRManager without stats collection.
-     */
-    public VSRManager(
-        String fileName,
-        IndexSettings indexSettings,
-        Schema schema,
-        ArrowBufferPool bufferPool,
-        int maxRowsPerVSR,
-        ThreadPool threadPool,
-        boolean runAsync,
-        long writerGeneration
-    ) {
-        this(
-            fileName,
-            indexSettings,
-            schema,
-            bufferPool,
-            maxRowsPerVSR,
-            threadPool,
-            runAsync,
-            writerGeneration,
-            ArrowIngestStats.NOOP
+            ArrowIngestStats.NOOP,
+            writer,
+            ThreadPool.Names.SAME
         );
     }
 

@@ -8,6 +8,9 @@
 
 package org.opensearch.dataformat.arrow.vsr;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Future;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
@@ -18,6 +21,12 @@ import org.opensearch.arrow.allocator.ArrowNativeAllocator;
 import org.opensearch.arrow.spi.NativeAllocatorPoolConfig;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
+import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
+import org.opensearch.dataformat.arrow.spi.FormatFileMetadata;
+import org.opensearch.dataformat.arrow.vsr.ManagedVSR;
+import org.opensearch.dataformat.arrow.vsr.VSRManager;
+import org.opensearch.dataformat.arrow.vsr.VSRState;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.DocumentInput;
@@ -25,17 +34,12 @@ import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.parquet.ParquetBaseTests;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
-import org.opensearch.dataformat.arrow.spi.FormatFileMetadata;
+import org.opensearch.parquet.bridge.NativeParquetWriter;
 import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.engine.ParquetDataFormat;
-import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
-import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
 import org.opensearch.threadpool.FixedExecutorBuilder;
 import org.opensearch.threadpool.ThreadPool;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.Future;
+import static org.opensearch.parquet.ParquetDataFormatPlugin.PARQUET_DATA_FORMAT;
 
 public class VSRManagerTests extends ParquetBaseTests {
 
@@ -88,7 +92,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testConstructionInitializesActiveVSR() throws Exception {
         String filePath = createTempDir().resolve("init.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L, new NativeParquetWriter(filePath));
         assertNotNull(manager.getActiveManagedVSR());
         assertEquals(VSRState.ACTIVE, manager.getActiveManagedVSR().getState());
         // flush handles freeze + close internally
@@ -97,7 +101,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testFlushWithNoDataReturnsMetadata() throws Exception {
         String filePath = createTempDir().resolve("empty.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L, new NativeParquetWriter(filePath));
         FormatFileMetadata metadata = manager.flush();
         // With lazy native writer init, flush returns null when no data was written
         assertNull(metadata);
@@ -105,7 +109,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testFlushWithData() throws Exception {
         String filePath = createTempDir().resolve("data.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L, new NativeParquetWriter(filePath));
 
         ManagedVSR active = manager.getActiveManagedVSR();
         IntVector vec = (IntVector) active.getVector("val");
@@ -126,11 +130,11 @@ public class VSRManagerTests extends ParquetBaseTests {
         schema = new Schema(fields);
 
         String filePath = createTempDir().resolve("add-doc.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L, new NativeParquetWriter(filePath));
 
         NumberFieldMapper.NumberFieldType valField = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.INTEGER);
         assignTestCapabilities(valField, PARQUET_FORMAT);
-        ArrowDocumentInput doc = new ArrowDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         populateMetadataFields(doc);
         doc.addField(valField, 42);
         doc.setRowId("__row_id__", 0);
@@ -145,7 +149,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testMaybeRotateNoOpBelowThreshold() throws Exception {
         String filePath = createTempDir().resolve("norotate.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L, new NativeParquetWriter(filePath));
         ManagedVSR original = manager.getActiveManagedVSR();
         original.setRowCount(100);
         manager.maybeRotateActiveVSR();
@@ -164,7 +168,7 @@ public class VSRManagerTests extends ParquetBaseTests {
      */
     public void testCloseReleasesPoolWhenBackgroundWriteFailed() throws Exception {
         String filePath = createTempDir().resolve("bgwrite-fail.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L, new NativeParquetWriter(filePath));
 
         // Materialize buffers on the active VSR's child allocator so the pool holds bytes.
         ManagedVSR active = manager.getActiveManagedVSR();
@@ -198,7 +202,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         String filePath = createTempDir().resolve("recovery-reinit.parquet").toString();
 
         // First writer: ingesting rotates (maxRowsPerVSR=1) and initializes the native writer.
-        VSRManager manager1 = new VSRManager(filePath, indexSettings, schema, bufferPool, 1, threadPool, 0L);
+        VSRManager manager1 = new VSRManager(filePath, indexSettings, schema, bufferPool, 1, threadPool, 0L, new NativeParquetWriter(filePath));
         ingest(manager1);
         assertBusy(() -> {
             Future<?> f = manager1.getPendingWrite();
@@ -211,7 +215,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         expectThrows(RuntimeException.class, manager1::close);
 
         // Second writer for the same file, same schema, same data: must initialize and flush cleanly.
-        VSRManager manager2 = new VSRManager(filePath, indexSettings, schema, bufferPool, 1, threadPool, 0L);
+        VSRManager manager2 = new VSRManager(filePath, indexSettings, schema, bufferPool, 1, threadPool, 0L, new NativeParquetWriter(filePath));
         try {
             ingest(manager2);
             FormatFileMetadata metadata = manager2.flush();
@@ -228,7 +232,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         NumberFieldMapper.NumberFieldType valField = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.INTEGER);
         assignTestCapabilities(valField, PARQUET_FORMAT);
         for (int i = 0; i < 2; i++) {
-            ArrowDocumentInput doc = new ArrowDocumentInput();
+            ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
             populateMetadataFields(doc);
             doc.addField(valField, i);
             doc.setRowId(DocumentInput.ROW_ID_FIELD, i);
@@ -238,7 +242,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testMaybeRotateAtThreshold() throws Exception {
         String filePath = createTempDir().resolve("rotate.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L, new NativeParquetWriter(filePath));
 
         ManagedVSR original = manager.getActiveManagedVSR();
         original.setRowCount(50000);
@@ -252,7 +256,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testFlushAfterRotation() throws Exception {
         String filePath = createTempDir().resolve("rotate-flush.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L, new NativeParquetWriter(filePath));
 
         // Fill first VSR to trigger rotation
         ManagedVSR first = manager.getActiveManagedVSR();
@@ -276,7 +280,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testRotationAwaitsWhenFrozenSlotOccupied() throws Exception {
         String filePath = createTempDir().resolve("double-rotate.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L, new NativeParquetWriter(filePath));
 
         // Fill first VSR to trigger rotation (async write submitted)
         ManagedVSR first = manager.getActiveManagedVSR();
@@ -311,7 +315,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testRotationWritesHappenOnBackgroundThread() throws Exception {
         String filePath = createTempDir().resolve("bg-thread.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L, new NativeParquetWriter(filePath));
 
         // Fill and rotate
         ManagedVSR first = manager.getActiveManagedVSR();
@@ -340,7 +344,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testFlushAwaitsBackgroundWrite() throws Exception {
         String filePath = createTempDir().resolve("flush-await.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L, new NativeParquetWriter(filePath));
 
         // Fill and rotate to trigger background write
         ManagedVSR first = manager.getActiveManagedVSR();
@@ -365,7 +369,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testCloseAwaitsBackgroundWrite() throws Exception {
         String filePath = createTempDir().resolve("close-await.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 100, threadPool, 0L, new NativeParquetWriter(filePath));
 
         // Fill and rotate to trigger background write
         ManagedVSR first = manager.getActiveManagedVSR();
@@ -382,7 +386,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testAddDocumentAfterReconcileSchemaAddsVector() throws Exception {
         String filePath = createTempDir().resolve("unknown-field.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 1L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 1L, new NativeParquetWriter(filePath));
 
         // Simulate a mapping update: the new schema introduces a tag field. reconcileSchema
         // adds the missing vector to the active VSR before addDocument runs.
@@ -393,7 +397,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         KeywordFieldMapper.KeywordFieldType tagField = new KeywordFieldMapper.KeywordFieldType("tag");
         assignTestCapabilities(valField, PARQUET_FORMAT);
         assignTestCapabilities(tagField, PARQUET_FORMAT);
-        ArrowDocumentInput doc = new ArrowDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         populateMetadataFields(doc);
         doc.setRowId(DocumentInput.ROW_ID_FIELD, 0);
         doc.addField(valField, 42);
@@ -407,14 +411,14 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testIsSchemaMutableBeforeAndAfterFlush() throws Exception {
         String filePath = createTempDir().resolve("schema-mutable.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 1L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 1L, new NativeParquetWriter(filePath));
         reconcileMetadata(manager);
 
         assertTrue(manager.isSchemaMutable());
 
         NumberFieldMapper.NumberFieldType valField = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.INTEGER);
         assignTestCapabilities(valField, PARQUET_FORMAT);
-        ArrowDocumentInput doc = new ArrowDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         populateMetadataFields(doc);
         doc.setRowId(DocumentInput.ROW_ID_FIELD, 0);
         doc.addField(valField, 1);
@@ -426,7 +430,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testSchemaUpdatePropagatesAcrossRotation() throws Exception {
         String filePath = createTempDir().resolve("schema-rotation.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 1, threadPool, 1L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 1, threadPool, 1L, new NativeParquetWriter(filePath));
 
         NumberFieldMapper.NumberFieldType valField = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.INTEGER);
         KeywordFieldMapper.KeywordFieldType tagField = new KeywordFieldMapper.KeywordFieldType("tag");
@@ -437,7 +441,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         // rotation triggered by maxRowsPerVSR=1.
         manager.reconcileSchema(schemaWith("tag", new ArrowType.Utf8()));
         {
-            ArrowDocumentInput doc1 = new ArrowDocumentInput();
+            ArrowDocumentInput doc1 = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
             populateMetadataFields(doc1);
             doc1.setRowId(DocumentInput.ROW_ID_FIELD, 0L);
             doc1.addField(valField, 1);
@@ -446,7 +450,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         }
 
         {
-            ArrowDocumentInput doc2 = new ArrowDocumentInput();
+            ArrowDocumentInput doc2 = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
             populateMetadataFields(doc2);
             doc2.setRowId(DocumentInput.ROW_ID_FIELD, 1L);
             doc2.addField(valField, 2);
@@ -455,7 +459,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         }
 
         {
-            ArrowDocumentInput doc3 = new ArrowDocumentInput();
+            ArrowDocumentInput doc3 = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
             populateMetadataFields(doc3);
             doc3.setRowId(DocumentInput.ROW_ID_FIELD, 2L);
             doc3.addField(valField, 3);
@@ -469,7 +473,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
     public void testReconcileSchemaAddsMultipleVectorsAtOnce() throws Exception {
         String filePath = createTempDir().resolve("multi-unknown.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 1L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 1L, new NativeParquetWriter(filePath));
 
         // Single reconcileSchema call adds three vectors plus the metadata fields the next
         // addDocument needs.
@@ -489,7 +493,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         assignTestCapabilities(tag2Field, PARQUET_FORMAT);
         assignTestCapabilities(tag3Field, PARQUET_FORMAT);
 
-        ArrowDocumentInput doc = new ArrowDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         populateMetadataFields(doc);
         doc.setRowId(DocumentInput.ROW_ID_FIELD, 0L);
         doc.addField(valField, 1);
@@ -509,18 +513,18 @@ public class VSRManagerTests extends ParquetBaseTests {
      */
     public void testAcceptedRowsCounterTracksAdmitsAndRollbacks() throws Exception {
         String filePath = createTempDir().resolve("accepted-counter.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L, new NativeParquetWriter(filePath));
         reconcileMetadata(manager);
         try {
             assertEquals(0L, manager.getAcceptedRows());
 
-            ArrowDocumentInput doc1 = new ArrowDocumentInput();
+            ArrowDocumentInput doc1 = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
             populateMetadataFields(doc1);
             doc1.setRowId(DocumentInput.ROW_ID_FIELD, 0L);
             manager.addDocument(doc1);
             assertEquals(1L, manager.getAcceptedRows());
 
-            ArrowDocumentInput doc2 = new ArrowDocumentInput();
+            ArrowDocumentInput doc2 = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
             populateMetadataFields(doc2);
             doc2.setRowId(DocumentInput.ROW_ID_FIELD, 1L);
             manager.addDocument(doc2);
@@ -530,7 +534,7 @@ public class VSRManagerTests extends ParquetBaseTests {
             assertEquals(1L, manager.getAcceptedRows());
 
             // Next doc reuses rowId 1 (the slot freed by rollback).
-            ArrowDocumentInput doc3 = new ArrowDocumentInput();
+            ArrowDocumentInput doc3 = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
             populateMetadataFields(doc3);
             doc3.setRowId(DocumentInput.ROW_ID_FIELD, 1L);
             manager.addDocument(doc3);
@@ -552,10 +556,10 @@ public class VSRManagerTests extends ParquetBaseTests {
         fields.add(new Field("val", FieldType.nullable(new ArrowType.Int(32, true)), null));
         fields.add(new Field(DocumentInput.ROW_ID_FIELD, FieldType.nullable(new ArrowType.Int(64, true)), null));
         Schema schemaWithRowId = new Schema(fields);
-        VSRManager manager = new VSRManager(filePath, indexSettings, schemaWithRowId, bufferPool, 50000, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schemaWithRowId, bufferPool, 50000, threadPool, 0L, new NativeParquetWriter(filePath));
         try {
             for (int i = 0; i < 50; i++) {
-                ArrowDocumentInput doc = new ArrowDocumentInput();
+                ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
                 populateMetadataFields(doc);
                 doc.setRowId(DocumentInput.ROW_ID_FIELD, (long) i);
                 manager.addDocument(doc);
@@ -600,7 +604,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
         String filePath = createTempDir().resolve("bg-write-success.parquet").toString();
         int lowThreshold = randomIntBetween(2, 5);
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, lowThreshold, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, lowThreshold, threadPool, 0L, new NativeParquetWriter(filePath));
 
         NumberFieldMapper.NumberFieldType valField = createNumberField("val", NumberFieldMapper.NumberType.INTEGER);
 
@@ -610,7 +614,7 @@ public class VSRManagerTests extends ParquetBaseTests {
         int rowId = 0;
         for (int cycle = 0; cycle < cycles; cycle++) {
             for (int i = 0; i < lowThreshold; i++) {
-                ArrowDocumentInput doc = new ArrowDocumentInput();
+                ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
                 populateMetadataFields(doc);
                 doc.addField(valField, rowId);
                 doc.setRowId(DocumentInput.ROW_ID_FIELD, rowId);
@@ -626,7 +630,7 @@ public class VSRManagerTests extends ParquetBaseTests {
 
             // This addDocument must NOT throw — verifies the fix for the
             // exceptionNow() bug on successfully completed futures
-            ArrowDocumentInput nextDoc = new ArrowDocumentInput();
+            ArrowDocumentInput nextDoc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
             populateMetadataFields(nextDoc);
             nextDoc.addField(valField, rowId);
             nextDoc.setRowId(DocumentInput.ROW_ID_FIELD, rowId);
@@ -648,13 +652,13 @@ public class VSRManagerTests extends ParquetBaseTests {
         String filePath = createTempDir().resolve("continuous-add.parquet").toString();
         int lowThreshold = randomIntBetween(2, 4);
         int totalDocs = lowThreshold * randomIntBetween(5, 12);
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, lowThreshold, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, lowThreshold, threadPool, 0L, new NativeParquetWriter(filePath));
 
         NumberFieldMapper.NumberFieldType valField = createNumberField("val", NumberFieldMapper.NumberType.INTEGER);
 
         // Add all docs in a tight loop — no waiting between rotations
         for (int i = 0; i < totalDocs; i++) {
-            ArrowDocumentInput doc = new ArrowDocumentInput();
+            ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
             populateMetadataFields(doc);
             doc.addField(valField, i);
             doc.setRowId(DocumentInput.ROW_ID_FIELD, i);
@@ -675,14 +679,14 @@ public class VSRManagerTests extends ParquetBaseTests {
         schema = new Schema(fields);
 
         String filePath = createTempDir().resolve("distinct.parquet").toString();
-        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L);
+        VSRManager manager = new VSRManager(filePath, indexSettings, schema, bufferPool, 50000, threadPool, 0L, new NativeParquetWriter(filePath));
 
         NumberFieldMapper.NumberFieldType priceField = new NumberFieldMapper.NumberFieldType("price", NumberFieldMapper.NumberType.INTEGER);
         NumberFieldMapper.NumberFieldType qtyField = new NumberFieldMapper.NumberFieldType("qty", NumberFieldMapper.NumberType.INTEGER);
         assignTestCapabilities(priceField, PARQUET_FORMAT);
         assignTestCapabilities(qtyField, PARQUET_FORMAT);
 
-        ArrowDocumentInput doc = new ArrowDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         populateMetadataFields(doc);
         doc.addField(priceField, 10);
         doc.addField(qtyField, 5);

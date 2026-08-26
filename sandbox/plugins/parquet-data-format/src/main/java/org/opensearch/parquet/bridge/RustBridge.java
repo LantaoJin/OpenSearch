@@ -8,12 +8,6 @@
 
 package org.opensearch.parquet.bridge;
 
-import org.opensearch.index.engine.dataformat.PackedRowIdMapping;
-import org.opensearch.index.engine.dataformat.RowIdMapping;
-import org.opensearch.nativebridge.spi.NativeCall;
-import org.opensearch.nativebridge.spi.NativeLibraryLoader;
-import org.opensearch.parquet.stats.ParquetNativeRuntimeStats;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.foreign.Arena;
@@ -33,6 +27,13 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.LongConsumer;
 import java.util.function.LongSupplier;
+import org.opensearch.dataformat.arrow.spi.FormatFileMetadata;
+import org.opensearch.dataformat.arrow.spi.FormatSortConfig;
+import org.opensearch.index.engine.dataformat.PackedRowIdMapping;
+import org.opensearch.index.engine.dataformat.RowIdMapping;
+import org.opensearch.nativebridge.spi.NativeCall;
+import org.opensearch.nativebridge.spi.NativeLibraryLoader;
+import org.opensearch.parquet.stats.ParquetNativeRuntimeStats;
 
 /**
  * FFM bridge to the native Rust parquet writer library.

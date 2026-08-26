@@ -8,6 +8,12 @@
 
 package org.opensearch.parquet.bridge;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.function.Consumer;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
@@ -21,15 +27,10 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.opensearch.dataformat.arrow.spi.FormatFileMetadata;
+import org.opensearch.dataformat.arrow.spi.FormatSortConfig;
 import org.opensearch.nativebridge.spi.ArrowExport;
 import org.opensearch.test.OpenSearchTestCase;
-
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.List;
-import java.util.function.Consumer;
 
 public class NativeParquetWriterTests extends OpenSearchTestCase {
 

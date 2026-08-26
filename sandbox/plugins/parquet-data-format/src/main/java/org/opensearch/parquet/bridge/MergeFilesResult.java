@@ -8,6 +8,7 @@
 
 package org.opensearch.parquet.bridge;
 
+import org.opensearch.dataformat.arrow.spi.FormatFileMetadata;
 import org.opensearch.index.engine.dataformat.RowIdMapping;
 
 /**

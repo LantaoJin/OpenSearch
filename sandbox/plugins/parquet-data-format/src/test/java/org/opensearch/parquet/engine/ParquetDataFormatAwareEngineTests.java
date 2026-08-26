@@ -8,6 +8,13 @@
 
 package org.opensearch.parquet.engine;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -17,6 +24,10 @@ import org.opensearch.arrow.spi.NativeAllocatorPoolConfig;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.network.InetAddresses;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
+import org.opensearch.dataformat.arrow.fields.ArrowField;
+import org.opensearch.dataformat.arrow.fields.ArrowFieldRegistry;
+import org.opensearch.dataformat.arrow.fields.plugins.CoreDataFieldPlugin;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.dataformat.AbstractDataFormatAwareEngineTestCase;
 import org.opensearch.index.engine.dataformat.DataFormatPlugin;
@@ -26,14 +37,14 @@ import org.opensearch.index.engine.dataformat.IndexingExecutionEngine;
 import org.opensearch.index.engine.dataformat.stub.MockSearchBackEndPlugin;
 import org.opensearch.index.mapper.BinaryFieldMapper.BinaryFieldType;
 import org.opensearch.index.mapper.BooleanFieldMapper.BooleanFieldType;
-import org.opensearch.index.mapper.DateFieldMapper;
 import org.opensearch.index.mapper.DateFieldMapper.DateFieldType;
+import org.opensearch.index.mapper.DateFieldMapper;
 import org.opensearch.index.mapper.IpFieldMapper.IpFieldType;
 import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
-import org.opensearch.index.mapper.MatchOnlyTextFieldMapper;
 import org.opensearch.index.mapper.MatchOnlyTextFieldMapper.MatchOnlyTextFieldType;
+import org.opensearch.index.mapper.MatchOnlyTextFieldMapper;
 import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.index.mapper.ParametrizedFieldMapper;
 import org.opensearch.index.mapper.SeqNoFieldMapper;
@@ -46,32 +57,20 @@ import org.opensearch.index.store.Store;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.RustBridge;
-import org.opensearch.dataformat.arrow.fields.ArrowFieldRegistry;
-import org.opensearch.dataformat.arrow.fields.ArrowField;
-import org.opensearch.dataformat.arrow.fields.plugins.CoreDataFieldPlugin;
-import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
 import org.opensearch.plugins.SearchBackEndPlugin;
 import org.opensearch.test.IndexSettingsModule;
 import org.opensearch.threadpool.FixedExecutorBuilder;
 import org.opensearch.threadpool.TestThreadPool;
 import org.opensearch.threadpool.ThreadPool;
-
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 import static org.opensearch.index.engine.dataformat.DataFormatTestUtils.assignTestCapabilities;
 import static org.opensearch.index.engine.dataformat.FieldTypeCapabilities.Capability.COLUMNAR_STORAGE;
 import static org.opensearch.parquet.ParquetBaseTests.ID_FIELD;
 import static org.opensearch.parquet.ParquetBaseTests.SEQ_NO_FIELD;
 import static org.opensearch.parquet.ParquetBaseTests.VERSION_FIELD;
 import static org.opensearch.parquet.ParquetBaseTests.metadataFields;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.opensearch.parquet.ParquetDataFormatPlugin.PARQUET_DATA_FORMAT;
 
 /**
  * Runs the {@link AbstractDataFormatAwareEngineTestCase} suite with the real
@@ -197,7 +196,7 @@ public class ParquetDataFormatAwareEngineTests extends AbstractDataFormatAwareEn
     @Override
     protected DocumentInput<?> createDocumentInput() {
         ParquetDataFormat format = new ParquetDataFormat();
-        ArrowDocumentInput input = new ArrowDocumentInput();
+        ArrowDocumentInput input = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         input.addField(ID_FIELD, "doc-id".getBytes(StandardCharsets.UTF_8));
         input.addField(NAME_FIELD, "name");
         addFieldWithCapabilities(

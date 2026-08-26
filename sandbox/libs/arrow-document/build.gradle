@@ -23,7 +23,7 @@
  * and its native binding. See sandbox/LOON-INTEGRATION-DESIGN.md.
  */
 
-java { sourceCompatibility = JavaVersion.toVersion(21); targetCompatibility = JavaVersion.toVersion(21) }
+java { sourceCompatibility = JavaVersion.toVersion(25); targetCompatibility = JavaVersion.toVersion(25) }
 
 testingConventions.enabled = false
 

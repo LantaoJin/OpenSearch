@@ -8,10 +8,18 @@
 
 package org.opensearch.parquet.writer;
 
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.function.Supplier;
 import org.apache.arrow.memory.OutOfMemoryException;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
+import org.opensearch.dataformat.arrow.document.MismatchedInputException;
+import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
+import org.opensearch.dataformat.arrow.spi.FormatFileMetadata;
+import org.opensearch.dataformat.arrow.vsr.VSRManager;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.dataformat.FileInfos;
 import org.opensearch.index.engine.dataformat.FlushInput;
@@ -22,20 +30,12 @@ import org.opensearch.index.engine.exec.MonoFileWriterSet;
 import org.opensearch.index.store.FileMetadata;
 import org.opensearch.index.store.FormatChecksumStrategy;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
-import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.NativeParquetWriter;
-import org.opensearch.dataformat.arrow.spi.FormatFileMetadata;
 import org.opensearch.parquet.engine.ParquetDataFormat;
-import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
 import org.opensearch.parquet.stats.ParquetShardStatsTracker;
-import org.opensearch.dataformat.arrow.vsr.VSRManager;
 import org.opensearch.plugin.stats.StatsRecorder;
 import org.opensearch.threadpool.ThreadPool;
-
-import java.io.IOException;
-import java.nio.file.Path;
-import java.util.function.Supplier;
 
 /**
  * Parquet file writer integrating OpenSearch's {@link Writer} interface with the VSR batching layer.

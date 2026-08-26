@@ -9,7 +9,9 @@
 package org.opensearch.parquet.bridge;
 
 import com.carrotsearch.randomizedtesting.annotations.ThreadLeakScope;
-
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.List;
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
@@ -22,12 +24,10 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.opensearch.dataformat.arrow.spi.FormatFileMetadata;
+import org.opensearch.dataformat.arrow.spi.FormatSortConfig;
 import org.opensearch.nativebridge.spi.ArrowExport;
 import org.opensearch.test.OpenSearchTestCase;
-
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
-import java.util.List;
 
 // The Tokio IO runtime worker thread (used by the Rust merge k-way merge sort) is a process-lifetime
 // singleton that persists after tests complete. It polls for new async IO tasks between merges.

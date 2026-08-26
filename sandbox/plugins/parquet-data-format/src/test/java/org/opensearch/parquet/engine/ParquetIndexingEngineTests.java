@@ -8,6 +8,11 @@
 
 package org.opensearch.parquet.engine;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.opensearch.Version;
@@ -16,6 +21,11 @@ import org.opensearch.arrow.spi.NativeAllocatorPoolConfig;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.index.shard.ShardId;
+import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
+import org.opensearch.dataformat.arrow.document.MismatchedInputException;
+import org.opensearch.dataformat.arrow.fields.ArrowField;
+import org.opensearch.dataformat.arrow.fields.ArrowFieldRegistry;
+import org.opensearch.dataformat.arrow.fields.ArrowSchemaBuilder;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.dataformat.FileInfos;
 import org.opensearch.index.engine.dataformat.FlushInput;
@@ -31,18 +41,8 @@ import org.opensearch.parquet.ParquetBaseTests;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.parquet.ParquetSettings;
 import org.opensearch.parquet.bridge.RustBridge;
-import org.opensearch.dataformat.arrow.fields.ArrowFieldRegistry;
-import org.opensearch.dataformat.arrow.fields.ArrowField;
-import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
 import org.opensearch.threadpool.FixedExecutorBuilder;
 import org.opensearch.threadpool.ThreadPool;
-
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 

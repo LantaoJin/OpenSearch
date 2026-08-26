@@ -8,6 +8,8 @@
 
 package org.opensearch.dataformat.arrow.vsr;
 
+import java.io.IOException;
+import java.util.List;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
@@ -16,10 +18,10 @@ import org.opensearch.arrow.allocator.ArrowNativeAllocator;
 import org.opensearch.arrow.spi.NativeAllocatorPoolConfig;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
+import org.opensearch.dataformat.arrow.vsr.ManagedVSR;
+import org.opensearch.dataformat.arrow.vsr.VSRPool;
+import org.opensearch.dataformat.arrow.vsr.VSRState;
 import org.opensearch.test.OpenSearchTestCase;
-
-import java.io.IOException;
-import java.util.List;
 
 public class VSRPoolTests extends OpenSearchTestCase {
 

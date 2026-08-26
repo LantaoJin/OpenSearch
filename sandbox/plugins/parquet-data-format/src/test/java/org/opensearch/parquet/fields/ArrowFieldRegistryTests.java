@@ -8,6 +8,9 @@
 
 package org.opensearch.dataformat.arrow.fields;
 
+import java.util.Map;
+import org.opensearch.dataformat.arrow.fields.ArrowField;
+import org.opensearch.dataformat.arrow.fields.ArrowFieldRegistry;
 import org.opensearch.index.mapper.BinaryFieldMapper;
 import org.opensearch.index.mapper.BooleanFieldMapper;
 import org.opensearch.index.mapper.DateFieldMapper;
@@ -22,8 +25,6 @@ import org.opensearch.index.mapper.SeqNoFieldMapper;
 import org.opensearch.index.mapper.TextFieldMapper;
 import org.opensearch.index.mapper.VersionFieldMapper;
 import org.opensearch.test.OpenSearchTestCase;
-
-import java.util.Map;
 
 public class ArrowFieldRegistryTests extends OpenSearchTestCase {
 

@@ -1,6 +1,8 @@
 # Loon-like Storage Capabilities in Mustang: A Format Seam Design
 
-**Status:** proposal, for review
+**Status:** proposal; changes 1 and 2 prototyped and compiling on `poc/loon-format-seam`, change 3 and
+the read path untouched. Numbers below are measured unless marked as projections. §11 lists the five
+claims the prototype corrected.
 **Goal:** let Mustang gain Milvus Loon's storage capabilities — above all, **cheap addition of new
 storage formats** — with the smallest possible change to existing code.
 **Verdict up front:** Mustang already has most of Loon's architecture. Two things are missing, and
@@ -52,15 +54,22 @@ Loon ships as a C++ shared library. Linking it into the OpenSearch JVM means imp
 
 | # | Change | Size | Unlocks |
 |---|---|---|---|
-| 1 | Extract the format-agnostic Arrow document pipeline out of `parquet-data-format` into a shared library | one refactor, mostly file moves; **measured at 3,276 lines shared** | every later format stops re-paying the mapping-to-Arrow pipeline |
+| 1 | Extract the format-agnostic Arrow document pipeline out of `parquet-data-format` into a shared library | **measured at 3,276 lines shared** — mostly file moves, but the batch manager must be inverted to take an injected writer, which is the part that carries risk | every later format stops re-paying the mapping-to-Arrow pipeline |
 | 2 | Add a Rust `FormatWriter`/`FormatReader` trait pair with name-based dispatch, mirroring Loon's `Format` factory | **measured at 290 lines Rust** + the Java seam interfaces | a new format becomes a Rust crate plus a thin `DataFormat` |
 | 3 | Add field→format routing to `CompositeDocumentInput` | ~200 lines | column groups, and with them per-format lifecycle isolation |
 
 Changes 1 and 2 have been **built and measured** on `poc/loon-format-seam`. A second format's
 native half came out at **206 lines** (a complete, tested Arrow IPC format); the Java half is
 projected at ~1,550. So a new format costs **≈1,750 lines against an 8,609-line baseline — a 4.9×
-reduction, not the 9.5× an earlier draft of this document claimed** (§7, §11). The change is
-additive: no existing format changes behaviour.
+reduction, not the 9.5× an earlier draft of this document claimed** (§7, §11).
+
+Two costs the reader should see before §2, because an earlier draft called this change "additive" and
+that was wrong. **No existing format changes behaviour, but existing callers do change.** Cutting the
+batch manager's dependency on Parquet means no constructor can default the writer any more, so every
+caller must name a format — 32 test files in the prototype, and a permanent API break rather than a
+refactor artifact. And because the shared library depends on the Panama FFM native binding, it must
+target **JDK 25**, which propagates that toolchain requirement to everything consuming the shared
+pipeline. Both are detailed in §11.
 
 ---
 
@@ -215,8 +224,11 @@ flowchart LR
 ```
 
 **Risk.** This is a refactor of code on the write hot path. It must be behaviour-preserving, proven
-by the existing `parquet-data-format` and `composite-engine` test suites passing unchanged — no new
-test should be needed for change 1, and needing one is a signal the move was not pure.
+by the existing `parquet-data-format` and `composite-engine` suites passing with **no changed
+assertion**. Note what that does *not* promise: those suites do not compile untouched. Imports move
+and constructors gain arguments, in 32 test files — §11 finding 4 explains why one of those causes is
+structural rather than incidental. A changed *assertion*, though, is still the signal that the move
+was not pure.
 
 **Why it comes first.** Every later format's cost estimate depends on it. Skipping it and adding a
 second format directly is the outcome this design exists to prevent.
@@ -242,30 +254,56 @@ Each implementation provides `explore` (discover files in a directory), `create_
 handles URI resolution and filesystem lookup so a subclass implements only `make_reader` /
 `make_writer`. **That base class is the reason a new single-file format in Loon is small.**
 
-**The Mustang equivalent.** In `libs/dataformat-native/rust`, add:
+**The Mustang equivalent.** A `format-seam` crate in `libs/dataformat-native/rust`. This is the shape
+as built, which differs from this design's first sketch in four ways worth naming — each is noted
+inline:
 
 ```rust
 pub trait FormatWriter: Send {
-    /// Consume one Arrow batch handed over via the C Data Interface.
-    fn write_batch(&mut self, array: *mut ArrowArray, schema: *mut ArrowSchema) -> Result<()>;
-    fn flush(&mut self) -> Result<FlushedFiles>;   // paths + row counts + format version
-    fn close(&mut self) -> Result<FlushedFiles>;
+    // (1) Takes a decoded `RecordBatch`, not raw C Data Interface pointers.
+    fn write(&mut self, batch: RecordBatch) -> Result<()>;
+    // (2) One terminal `finalize`, consuming the writer, instead of `flush` + `close`.
+    fn finalize(self: Box<Self>) -> Result<FlushedFile>;
+    // (3) Native accounting is on the writer, feeding `getNativeBytesUsed`.
+    fn native_bytes_used(&self) -> u64 { 0 }
 }
 
 pub trait FormatReader: Send {
-    /// Return an Arrow stream over the given files, with an optional projection.
-    fn open(&self, files: &[FileRef], projection: Option<&[usize]>) -> Result<ArrowArrayStream>;
-    fn row_count(&self, file: &FileRef) -> Result<u64>;
+    fn schema(&self, file: &str) -> Result<SchemaRef>;
+    fn row_count(&self, file: &str) -> Result<u64>;
+    // (1 again) Yields Arrow batches, not an `ArrowArrayStream`.
+    fn scan(&self, files: &[String], projection: Option<&[usize]>)
+        -> Result<Box<dyn Iterator<Item = Result<RecordBatch>> + Send>>;
 }
 
 pub trait Format: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn writer(&self, cfg: &WriterCfg) -> Result<Box<dyn FormatWriter>>;
+    fn name(&self) -> &'static str;       // must equal the Java `DataFormat.name()`
+    fn extension(&self) -> &'static str;  // (4) the format's own file extension
+    fn writer(&self, cfg: &WriterConfig) -> Result<Box<dyn FormatWriter>>;
     fn reader(&self) -> Result<Box<dyn FormatReader>>;
+    // (4 again) Whether the format can sort while writing; if not, it needs a pre-sorted stream.
+    fn supports_write_sort(&self) -> bool { false }
 }
 
 pub fn format_for(name: &str) -> Result<&'static dyn Format>;   // the dispatch
 ```
+
+Why each change was forced:
+
+1. **The FFI boundary belongs outside the trait.** Pointer-taking trait methods would make every
+   format implementation responsible for C Data Interface safety. Importing at the FFI entry point
+   and passing `RecordBatch` inward means a format author writes only safe Rust — the single largest
+   reduction in what a new format must get right. It also lets the reader return an iterator, which
+   a format can implement without touching the C ABI.
+2. **`flush` + `close` cannot both exist on a single-file writer.** `finalize(self: Box<Self>)`
+   encodes in the type system that the writer is spent, which is the real contract; two methods
+   invited a use-after-flush bug.
+3. **Native memory accounting has no other home.** `IndexingExecutionEngine::getNativeBytesUsed`
+   already exists and must keep reporting, so the seam has to expose it.
+4. **`extension` and `supports_write_sort` are what the caller cannot infer.** File naming and
+   whether an index sort can be pushed into the writer are per-format facts the Java side needs
+   before it commits to a plan; omitting them forced the caller to special-case Parquet, which is
+   exactly the coupling the seam removes.
 
 `ParquetFormat` becomes the first implementation, wrapping the code already in
 `plugins/parquet-data-format/src/main/rust`. The existing FFI entry points keep their signatures —
@@ -389,7 +427,7 @@ land after changes 1 and 2 are in production, not alongside them.
 
 | # | What | How | Gate |
 |---|---|---|---|
-| 1 | Change 1 is behaviour-preserving | existing `parquet-data-format` + `composite-engine` suites pass **unchanged**; needing a new test signals an impure move | no regression |
+| 1 | Change 1 is behaviour-preserving | existing `parquet-data-format` + `composite-engine` suites pass with **no changed assertions**; a changed *assertion* signals an impure move, but changed imports and constructor arguments are expected — see finding 4 | no changed assertion — **met: 201/201 pass, 15 assertion lines differ and all 15 are type renames** |
 | 2 | The format seam is neutral for Parquet | route Parquet through `format_for("parquet")`; compare flush/merge byte counts and ingest throughput against the pre-change build | ±3% throughput |
 | 3 | A second format works end to end | index → refresh → query a Vortex-backed index through DataFusion via the Arrow stream path | correctness first, then latency |
 | 4 | `__row_id__` alignment survives independent flush (change 3 only) | flush formats at different cadences, then assert cross-format joins resolve the same logical documents | hard gate |
@@ -402,7 +440,7 @@ is proven independently of routing.
 
 ## 11. Prototype findings
 
-Changes 1 and 2 were built on this branch. Three findings changed the design's claims.
+Changes 1 and 2 were built on this branch. Five findings changed the design's claims.
 
 **1. The extraction shares 38%, not ~90%.** An earlier draft asserted roughly 7,700 of 8,609 lines
 were format-agnostic. Measured: 3,276. The misjudgement came from counting the 36 field classes and
@@ -425,7 +463,34 @@ workspace dependency — the Parquet writer stages through `.arrow_ipc_staging` 
 the seam question from the dependency question. Vortex or Lance is the same glue plus a real
 third-party crate.
 
-The seam holds. The cost claim needed halving.
+**4. "Existing suites pass unchanged" was not achievable, and the reason is structural.** §10 item 1
+originally gated change 1 on the test suites compiling untouched. They did not: 32 test files needed
+edits — 23 `VSRManager` construction sites and 27 `ArrowDocumentInput` construction sites, plus import
+rewrites across the renamed `fields/` package. Two distinct causes, only one of them incidental:
+
+- *Incidental:* moving a class to another package turns a same-package reference into one needing an
+  import. Type renames (`ParquetField` → `ArrowField`) are mechanical, but a rename tool that
+  rewrites references without adding imports leaves the tree uncompilable — this bit both the main
+  and test trees.
+- *Structural, and the interesting one:* inverting `VSRManager` to take an injected
+  `NativeFormatWriter` **removes the possibility of any constructor that defaults the writer.** Every
+  convenience overload previously worked precisely because `VSRManager` knew it was Parquet. Keeping
+  one would re-establish the dependency the seam exists to cut, so the prototype deliberately kept
+  exactly two constructors, both requiring the writer. Callers must now name a format.
+
+That is a real, permanent API break for every existing caller — not a refactor artifact. The gate was
+rewritten to "no changed *assertion*", which the prototype does satisfy: the edits are imports and
+constructor arguments, and no test's expected behaviour changed. Anyone budgeting this work should
+price the caller migration, not assume the move is invisible.
+
+**5. The shared library must target JDK 25, not 21.** `arrow-document` was first written against JDK
+21, matching most sandbox modules, and failed to compile: it depends on `dataformat-native` and
+`plugin-stats-spi`, which are JDK 25 because the native binding uses Panama FFM
+(`java.lang.foreign`). Extracting a shared Arrow module therefore **propagates the FFM toolchain
+requirement to every consumer of the shared pipeline**, which is a constraint on where the module can
+live rather than a build-file detail.
+
+The seam holds. The cost claim needed halving, and the "invisible refactor" claim was wrong.
 
 ---
 
@@ -483,14 +548,29 @@ Changes 1 and 2 were executed on this branch (`poc/loon-format-seam`, branched f
 
 ### Still unverified
 
-- **No Gradle compile and no cluster run.** The Java side is structurally consistent but
-  uncompiled; that needs `-Dsandbox.enabled=true` on JDK 25 plus the native library build.
+- **No cluster run.** Compilation is green (below); nothing has been indexed or queried through the
+  refactored pipeline on a live node.
 - **The ≈1,550-line Java figure for a new format is a projection**, from which Parquet files a new
   format must write its own version of. Building `arrow-ipc-data-format`'s Java half would confirm it.
 - **The read path is untouched.** `DatafusionReader` still narrows to `MonoFileWriterSet` and hands
   paths to a native Parquet opener. Registering a `FormatReader` stream as a DataFusion table
   provider — §7's one genuinely new mechanism — is not prototyped.
-- **Test migration was deliberately skipped.** Tests exercising moved classes stay in
-  `parquet-data-format` with rewritten imports. That satisfies "existing suites pass unchanged" but
-  leaves them in the wrong module; moving them needs Gradle test-fixtures wiring.
+- **Tests were adapted, not migrated.** Tests exercising moved classes stay in `parquet-data-format`
+  with rewritten imports and constructor arguments (finding 4). They are in the wrong module; moving
+  them needs Gradle test-fixtures wiring.
 - **Change 3 (field routing) is not prototyped at all.**
+
+### Compiled and run
+
+| Step | Result |
+|---|---|
+| `:sandbox:libs:arrow-document:compileJava` | pass, after retargeting the module to JDK 25 (finding 5) |
+| `:sandbox:plugins:parquet-data-format:compileJava` | pass, after repairing imports the rename left behind |
+| `:sandbox:plugins:parquet-data-format:compileTestJava` | pass, after adapting 32 test files (finding 4) |
+| `:sandbox:plugins:parquet-data-format:test` | **201 tests in 24 classes, 0 failures, 0 errors, 0 skipped** (22m 49s, including the Rust cdylib build) |
+| Assertion audit — the §10 item 1 gate | **pass.** 15 assertion lines differ across the whole test tree, and every one is a type rename (`ParquetField` → `ArrowField`, `ParquetSortConfig` → `FormatSortConfig`); no assertion's semantics changed |
+
+The suite is not a compile-only check: `NativeParquetWriterTests`, `ParquetMergeIntegrationTests` and
+`VSRManagerTests` drive real Arrow batches through the Panama boundary into the Rust writer and read
+the resulting files back. So the seam is exercised end to end on the write path, with Parquet routed
+through the injected `NativeFormatWriter` rather than a hard-coded one.

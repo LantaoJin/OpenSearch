@@ -8,6 +8,9 @@
 
 package org.opensearch.parquet.writer;
 
+import java.util.List;
+import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
+import org.opensearch.dataformat.arrow.document.FieldValuePair;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.mapper.KeywordFieldMapper;
@@ -16,15 +19,14 @@ import org.opensearch.index.mapper.MapperParsingException;
 import org.opensearch.index.mapper.NumberFieldMapper;
 import org.opensearch.parquet.ParquetBaseTests;
 import org.opensearch.parquet.engine.ParquetDataFormat;
-
-import java.util.List;
+import static org.opensearch.parquet.ParquetDataFormatPlugin.PARQUET_DATA_FORMAT;
 
 public class ArrowDocumentInputTests extends ParquetBaseTests {
 
     private static final DataFormat PARQUET_FORMAT = new ParquetDataFormat();
 
     public void testAddFieldAndGetFinalInput() {
-        ArrowDocumentInput input = new ArrowDocumentInput();
+        ArrowDocumentInput input = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         MappedFieldType ft = new NumberFieldMapper.NumberFieldType("age", NumberFieldMapper.NumberType.INTEGER);
         assignTestCapabilities(ft, PARQUET_FORMAT);
         input.addField(ft, 25);
@@ -37,7 +39,7 @@ public class ArrowDocumentInputTests extends ParquetBaseTests {
     }
 
     public void testMultipleFields() {
-        ArrowDocumentInput input = new ArrowDocumentInput();
+        ArrowDocumentInput input = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         MappedFieldType ft1 = new NumberFieldMapper.NumberFieldType("a", NumberFieldMapper.NumberType.INTEGER);
         MappedFieldType ft2 = new KeywordFieldMapper.KeywordFieldType("b");
         assignTestCapabilities(ft1, PARQUET_FORMAT);
@@ -50,21 +52,21 @@ public class ArrowDocumentInputTests extends ParquetBaseTests {
     }
 
     public void testEmptyInput() {
-        ArrowDocumentInput input = new ArrowDocumentInput();
+        ArrowDocumentInput input = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         populateMetadataFields(input);
         input.setRowId(DocumentInput.ROW_ID_FIELD, 0L);
         assertEquals(4, input.getFinalInput().size());
     }
 
     public void testSetRowId() {
-        ArrowDocumentInput input = new ArrowDocumentInput();
+        ArrowDocumentInput input = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         populateMetadataFields(input);
         input.setRowId(DocumentInput.ROW_ID_FIELD, 42L);
         assertEquals(42L, input.getRowId());
     }
 
     public void testCloseClearsState() {
-        ArrowDocumentInput input = new ArrowDocumentInput();
+        ArrowDocumentInput input = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         populateMetadataFields(input);
         MappedFieldType ft = new NumberFieldMapper.NumberFieldType("age", NumberFieldMapper.NumberType.INTEGER);
         assignTestCapabilities(ft, PARQUET_FORMAT);
@@ -77,7 +79,7 @@ public class ArrowDocumentInputTests extends ParquetBaseTests {
     }
 
     public void testRejectsDuplicateFieldInSingleDocument() throws Exception {
-        ArrowDocumentInput input = new ArrowDocumentInput();
+        ArrowDocumentInput input = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         populateMetadataFields(input);
 
         NumberFieldMapper.NumberFieldType valField = new NumberFieldMapper.NumberFieldType("val", NumberFieldMapper.NumberType.INTEGER);

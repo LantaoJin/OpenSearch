@@ -19,11 +19,11 @@
  * <ul>
  *   <li>{@link org.opensearch.parquet.bridge.RustBridge} — Static JNI method declarations
  *       and native library loading. Writer lifecycle methods are package-private.</li>
- *   <li>{@link org.opensearch.parquet.bridge.NativeParquetWriter} — Type-safe handle wrapping
+ *   <li>{@link org.opensearch.parquet.bridge.NativeParquetWriter} — the {@code NativeFormatWriter} implementation wrapping
  *       the native writer with lifecycle management (create → write → close → flush).</li>
  *   <li>{@link org.opensearch.nativebridge.spi.ArrowExport} — RAII container for exported
  *       Arrow C Data Interface pointers ({@code ArrowArray} + {@code ArrowSchema}).</li>
- *   <li>{@link org.opensearch.parquet.bridge.FormatFileMetadata} — Immutable record of
+ *   <li>{@link org.opensearch.dataformat.arrow.spi.FormatFileMetadata} — Immutable record of
  *       metadata returned by the native writer after file finalization.</li>
  * </ul>
  *

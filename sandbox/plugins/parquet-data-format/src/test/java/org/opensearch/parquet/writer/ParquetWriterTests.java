@@ -8,6 +8,10 @@
 
 package org.opensearch.parquet.writer;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import org.apache.arrow.memory.OutOfMemoryException;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -16,6 +20,11 @@ import org.opensearch.arrow.allocator.ArrowNativeAllocator;
 import org.opensearch.arrow.spi.NativeAllocatorPoolConfig;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.dataformat.arrow.document.ArrowDocumentInput;
+import org.opensearch.dataformat.arrow.fields.ArrowField;
+import org.opensearch.dataformat.arrow.fields.ArrowFieldRegistry;
+import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
+import org.opensearch.dataformat.arrow.vsr.VSRManager;
 import org.opensearch.index.IndexSettings;
 import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.engine.dataformat.FileInfos;
@@ -28,16 +37,9 @@ import org.opensearch.parquet.ParquetBaseTests;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.parquet.bridge.RustBridge;
 import org.opensearch.parquet.engine.ParquetDataFormat;
-import org.opensearch.dataformat.arrow.fields.ArrowFieldRegistry;
-import org.opensearch.dataformat.arrow.fields.ArrowField;
-import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
 import org.opensearch.threadpool.FixedExecutorBuilder;
 import org.opensearch.threadpool.ThreadPool;
-
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
+import static org.opensearch.parquet.ParquetDataFormatPlugin.PARQUET_DATA_FORMAT;
 
 public class ParquetWriterTests extends ParquetBaseTests {
 
@@ -111,7 +113,7 @@ public class ParquetWriterTests extends ParquetBaseTests {
             null
         );
 
-        ArrowDocumentInput doc = new ArrowDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         populateMetadataFields(doc);
         doc.addField(idField, 1);
         doc.addField(nameField, "alice");
@@ -138,7 +140,7 @@ public class ParquetWriterTests extends ParquetBaseTests {
             null
         );
 
-        ArrowDocumentInput doc = new ArrowDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         populateMetadataFields(doc);
         doc.addField(idField, 42);
         doc.addField(nameField, "bob");
@@ -167,7 +169,7 @@ public class ParquetWriterTests extends ParquetBaseTests {
         );
 
         for (int i = 0; i < 10; i++) {
-            ArrowDocumentInput doc = new ArrowDocumentInput();
+            ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
             populateMetadataFields(doc);
             doc.addField(idField, i);
             doc.addField(nameField, "user_" + i);
@@ -219,7 +221,7 @@ public class ParquetWriterTests extends ParquetBaseTests {
         // VectorSchemaRoot inside VSRManager.addDocument throws an Arrow OutOfMemoryException.
         nativeAllocator.setPoolLimit(NativeAllocatorPoolConfig.POOL_INGEST, 1L);
 
-        ArrowDocumentInput doc = new ArrowDocumentInput();
+        ArrowDocumentInput doc = new ArrowDocumentInput(PARQUET_DATA_FORMAT);
         populateMetadataFields(doc);
         doc.addField(idField, 1);
         doc.addField(nameField, "alice");

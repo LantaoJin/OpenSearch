@@ -8,6 +8,7 @@
 
 package org.opensearch.parquet.writer;
 
+import org.opensearch.dataformat.arrow.document.FieldValuePair;
 import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.NumberFieldMapper;

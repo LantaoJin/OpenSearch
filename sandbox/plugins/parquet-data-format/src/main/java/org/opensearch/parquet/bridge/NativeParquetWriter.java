@@ -8,17 +8,18 @@
 
 package org.opensearch.parquet.bridge;
 
+import java.io.IOException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.common.SetOnce;
-import org.opensearch.index.engine.dataformat.RowIdMapping;
+import org.opensearch.dataformat.arrow.spi.FormatFileMetadata;
+import org.opensearch.dataformat.arrow.spi.FormatSortConfig;
 import org.opensearch.dataformat.arrow.spi.NativeFormatWriter;
+import org.opensearch.index.engine.dataformat.RowIdMapping;
 import org.opensearch.parquet.ParquetDataFormatPlugin;
 import org.opensearch.parquet.stats.ParquetShardStatsTracker;
 import org.opensearch.plugin.stats.StatsRecorder;
-
-import java.io.IOException;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Type-safe handle for the native Rust Parquet writer with lifecycle management.

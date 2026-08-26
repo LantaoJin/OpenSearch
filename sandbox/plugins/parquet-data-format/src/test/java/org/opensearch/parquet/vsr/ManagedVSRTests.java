@@ -8,6 +8,7 @@
 
 package org.opensearch.dataformat.arrow.vsr;
 
+import java.util.List;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.FieldVector;
@@ -16,9 +17,9 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.opensearch.dataformat.arrow.vsr.ManagedVSR;
+import org.opensearch.dataformat.arrow.vsr.VSRState;
 import org.opensearch.test.OpenSearchTestCase;
-
-import java.util.List;
 
 public class ManagedVSRTests extends OpenSearchTestCase {
 

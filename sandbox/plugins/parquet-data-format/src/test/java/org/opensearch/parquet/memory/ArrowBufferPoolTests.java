@@ -13,6 +13,7 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.opensearch.arrow.allocator.ArrowNativeAllocator;
 import org.opensearch.arrow.spi.NativeAllocatorPoolConfig;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.dataformat.arrow.memory.ArrowBufferPool;
 import org.opensearch.test.OpenSearchTestCase;
 
 public class ArrowBufferPoolTests extends OpenSearchTestCase {
